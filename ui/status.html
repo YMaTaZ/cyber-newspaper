@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>生成状态</title>
+<style>
+  /* 瑞士国际主义 + 宿主主题跟随。--hana-* 由 assets/theme-follow.js 从宿主搬来。
+     只跟背景与主色；文字按明暗取高对比值。 */
+  :root {
+    --paper:     var(--hana-bg, var(--bg, #FFFFFF));
+    --ink: #000000;
+    --ink-body: #111111;
+    --ink-soft: #333333;
+    --ink-faint: #5A5A5A;
+    --dg-accent:        var(--hana-accent, var(--accent, #2E5F80));
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, var(--ink));
+    --rule: #000000;
+    --rule-soft: var(--hana-border, var(--border, #C8C8C8));
+  }
+  :root[data-color-mode="dark"] {
+    --ink: #FFFFFF;
+    --ink-body: #F2F2F2;
+    --ink-soft: #D6D6D6;
+    --ink-faint: #C2C2C2;
+    --rule: #FFFFFF;
+    --rule-soft: rgba(255, 255, 255, 0.24);
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, #FFFFFF);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--paper); color: var(--ink-body);
+    font-family: "Helvetica Neue", Helvetica, Arial, "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 13px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { padding: 20px 18px 28px; }
+  h2 {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--dg-accent-text);
+    margin: 0 0 14px;
+  }
+  .row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--rule-soft); font-size: 13px;
+  }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: var(--ink-faint); }
+  .row .v { font-weight: 700; color: var(--ink); }
+  .muted { color: var(--ink-faint); font-size: 12.5px; line-height: 1.7; }
+  .tip {
+    margin-top: 20px; padding: 13px 15px; border: 1px solid var(--rule);
+    border-left: 6px solid var(--dg-accent);
+    font-size: 12px; line-height: 1.68; color: var(--ink-soft);
+  }
+  .dot {
+    display: inline-block; width: 7px; height: 7px;
+    background: var(--dg-accent); margin-right: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>数据源</h2>
+  <div id="srcs" class="muted">载入中…</div>
+
+  <h2 style="margin-top:26px">归档</h2>
+  <div id="arch" class="muted">载入中…</div>
+
+  <div class="tip">
+    生成在工作台里完成。这个面板只显示状态，不触发任何动作。
+  </div>
+</div>
+
+<script type="module">
+// 必须先 import SDK 并调用 hana.ready()：宿主收到这条 ready 消息才认页面就绪，
+// 5 秒内收不到就一律显示「应用加载失败」。
+import { hana } from "./assets/sdk.js";
+import { followHostTheme } from "./assets/theme-follow.js";
+hana.ready();
+followHostTheme(hana);
+
+function authHeaders() {
+  const h = new Headers();
+  const ss = new URLSearchParams(location.search).get("appSurfaceSession") || "";
+  if (ss) h.set("X-Hana-App-Surface-Session", ss);
+  return h;
+}
+async function api(path) {
+  const res = await fetch(`/api/apps/cyber-newspaper/routes${path}`, { headers: authHeaders() });
+  return await res.json().catch(() => ({ ok: false }));
+}
+
+(async () => {
+  const [cf, ar] = await Promise.all([
+    api("/api/digest/config"),
+    api("/api/digest/archive"),
+  ]);
+
+  const enabled = cf.ok ? (cf.config.enabledSources ?? null) : null;
+  const total = 8;
+  const on = enabled ? enabled.length : total;
+  document.getElementById("srcs").innerHTML = cf.ok
+    ? `<div class="row"><span class="k">已启用</span><span class="v"><span class="dot"></span>${on} / ${total}</span></div>
+       <div class="row"><span class="k">时间窗口</span><span class="v">${cf.config.windowHours ?? 24} 小时</span></div>
+       <div class="row"><span class="k">候选上限</span><span class="v">${cf.config.maxCandidates ?? 40} 条</span></div>
+       <div class="row"><span class="k">模型</span><span class="v">${cf.config.model ?? "未选择"}</span></div>`
+    : "读取失败";
+
+  if (ar.ok) {
+    const es = ar.index?.entries ?? [];
+    const latest = es[0];
+    document.getElementById("arch").innerHTML =
+      `<div class="row"><span class="k">已归档</span><span class="v">${es.length} 期</span></div>` +
+      (latest
+        ? `<div class="row"><span class="k">最近一期</span><span class="v">${latest.date}</span></div>
+           <div class="row"><span class="k">下期期号</span><span class="v">NO.${String(ar.index.nextIssueNo ?? 1).padStart(3, "0")}</span></div>`
+        : "");
+  }
+})();
+</script>
+</body>
+</html>

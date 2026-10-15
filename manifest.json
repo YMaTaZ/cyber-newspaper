@@ -1,0 +1,77 @@
+{
+  "manifestVersion": 2,
+  "id": "cyber-newspaper",
+  "name": "Cyber Newspaper",
+  "version": "0.6.2",
+  "entry": "index.js",
+  "icon": "assets/icon.png",
+  "description": "赛博报纸：抓取多个公开 AI 数据源，归并去重后由你选定的模型整理成当天的结构化日报，按日期归档、可搜索、可导出。",
+  "minAppVersion": "0.1028.0",
+  "capabilities": [
+    "app/tools.expose-to-model",
+    "app/models.infer",
+    "app/render.pdf"
+  ],
+  "network": {
+    "allowedHosts": [
+      "hn.algolia.com",
+      "api.github.com",
+      "export.arxiv.org",
+      "www.qbitai.com",
+      "www.infoq.cn",
+      "techcrunch.com",
+      "arstechnica.com",
+      "openai.com"
+    ],
+    "methods": ["GET"],
+    "allowLocalhost": false,
+    "defaultTimeoutMs": 15000,
+    "maxResponseBytes": 8388608
+  },
+  "activation": {
+    "mode": "on-demand",
+    "tools": [
+      {
+        "name": "daily_run",
+        "description": "生成当天的赛博报纸。抓取多个公开 AI 数据源，归并去重后由模型整理成结构化日报，归档并返回。在会话里被调用时会同时产出 PDF。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "withPdf": {
+              "type": "boolean",
+              "description": "是否同时产出 PDF。默认 true。"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "contributes": {
+    "cards": [
+      {
+        "id": "workbench",
+        "title": "日报",
+        "description": "当天的 AI 热点摘要，按日期归档，可搜索、可导出。",
+        "route": "/workbench.html",
+        "realization": "page",
+        "siteNavEntry": true,
+        "fpFullPanel": true,
+        "functionPanel": {
+          "id": "daily-status",
+          "label": "生成状态",
+          "route": "/status.html"
+        },
+        "cardForm": "flush",
+        "face": {
+          "image": "assets/cover.webp"
+        }
+      }
+    ],
+    "settings": {
+      "title": "日报",
+      "ui": {
+        "route": "/settings.html"
+      }
+    }
+  }
+}

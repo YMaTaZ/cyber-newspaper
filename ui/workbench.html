@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>日报</title>
+<style>
+  /* 瑞士国际主义 + 宿主主题跟随
+     跟随规则：背景、面板、主色、分隔线跟宿主；**文字不跟宿主色值**。
+     原因：宿主主题的 --text 是为它自己的 UI 选的（暖纸是深灰 #3B3D3F），
+     拿来做正文会直接把对比度拉低。文字只根据宿主背景的明暗取高对比值。
+     --hana-* 由 assets/theme-follow.js 从宿主搬过来，并写 data-color-mode。
+     结构特征（硬线、字号层级、大写小标签、零圆角）不跟随，这是风格本体。 */
+  :root {
+    --paper:     var(--hana-bg, var(--bg, #FFFFFF));
+    --panel:     var(--hana-bg-card, var(--bg-card, var(--hana-bg, var(--bg, #FFFFFF))));
+    --sidebar:   var(--hana-sidebar-bg, var(--sidebar-bg, var(--hana-bg, var(--bg, #FFFFFF))));
+    --ink: #000000;
+    --ink-body: #111111;
+    --ink-soft: #333333;
+    --ink-faint: #5A5A5A;
+    --dg-accent:        var(--hana-accent, var(--accent, #2E5F80));
+    --dg-accent-soft: color-mix(in srgb, var(--dg-accent) 12%, transparent);
+    /* 用作文字的强调色：向 --ink 混合，保证小字可读（同渲染器的做法） */
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, var(--ink));
+    /* 主色上的反色：由 theme-follow.js 按宿主主色亮度算出，默认白 */
+    --on-accent: #FFFFFF;
+    --rule: #000000;
+    --rule-soft: var(--hana-border, var(--border, #C8C8C8));
+    --dg-danger: #A81E28;
+    --ok: #166534;
+  }
+  /* 深色主题：文字与硬线整体反转为高对比白字，背景仍用宿主值 */
+  :root[data-color-mode="dark"] {
+    --ink: #FFFFFF;
+    --ink-body: #F2F2F2;
+    --ink-soft: #D6D6D6;
+    --ink-faint: #C2C2C2;
+    --rule: #FFFFFF;
+    --rule-soft: rgba(255, 255, 255, 0.24);
+    --dg-accent-soft: color-mix(in srgb, var(--dg-accent) 22%, transparent);
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, #FFFFFF);
+    --dg-danger: #E58A8A;
+    --ok: #8CC790;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--paper); color: var(--ink-body);
+    font-family: "Helvetica Neue", Helvetica, Arial, "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-weight: 400; -webkit-font-smoothing: antialiased;
+  }
+  #app { display: flex; height: 100%; }
+
+  /* 通用小标签 */
+  .caps {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+
+  /* ================= 左侧导航栏 ================= */
+  nav.side {
+    width: 272px; flex: none;
+    background: var(--paper); border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .side-head { padding: 20px 18px 16px; border-bottom: 1px solid var(--rule); flex: none; }
+  .side-head .brand { display: flex; align-items: baseline; gap: 9px; margin-bottom: 16px; }
+  .side-head .brand .mark {
+    width: 11px; height: 11px; flex: none; background: var(--dg-accent);
+    transform: translateY(-1px);
+  }
+  .side-head .brand h1 {
+    font-size: 15px; font-weight: 700; margin: 0; letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .search-box input {
+    width: 100%; padding: 9px 0; border: none;
+    border-bottom: 2px solid var(--rule);
+    font-size: 13.5px; font-family: inherit;
+    background: transparent; color: var(--ink);
+  }
+  .search-box input::placeholder { color: var(--ink-faint); }
+  .search-box input:focus { outline: none; border-bottom-color: var(--dg-accent); }
+
+  .side-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+
+  .nav-sec { padding: 16px 0 6px; }
+  .nav-sec .nav-title {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-faint); padding: 0 18px 9px;
+  }
+
+  /* 本期目录：吸顶 */
+  .toc-sec {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--paper); padding-top: 14px;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .toc { max-height: 40vh; overflow-y: auto; padding: 0 0 10px; }
+  .toc .toc-item {
+    display: block; padding: 8px 18px; font-size: 13.5px;
+    color: var(--ink-body); cursor: pointer;
+    border-left: 3px solid transparent; margin-left: 0;
+    line-height: 1.44; text-decoration: none;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .toc .toc-item:hover { color: var(--dg-accent-text); }
+  .toc .toc-item.on {
+    color: var(--ink); font-weight: 700;
+    border-left-color: var(--dg-accent);
+  }
+  .toc .toc-item .cnt {
+    color: var(--ink-faint); font-size: 11px; margin-left: 6px;
+    font-weight: 400;
+  }
+
+  /* 往期归档 */
+  .arch-sec { padding-top: 14px; }
+  .list { padding: 0 0 12px; }
+  .entry {
+    padding: 11px 18px; cursor: pointer;
+    border-left: 3px solid transparent;
+    font-size: 13.5px; line-height: 1.42;
+  }
+  .entry:hover { color: var(--dg-accent-text); }
+  .entry.on { border-left-color: var(--dg-accent); }
+  .entry .d { font-weight: 700; color: var(--ink); }
+  .entry .n {
+    color: var(--ink-faint); font-size: 11px; margin-left: 8px;
+    font-weight: 700; letter-spacing: .08em;
+  }
+  .entry .t {
+    color: var(--ink-soft); font-size: 12.5px; margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .empty-list {
+    padding: 24px 18px; color: var(--ink-faint); font-size: 12.5px;
+    line-height: 1.7;
+  }
+
+  /* 侧栏底部：模型 */
+  .side-foot {
+    flex: none; border-top: 1px solid var(--rule); padding: 16px 18px;
+  }
+  .side-foot .lbl {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-faint); margin-bottom: 10px;
+  }
+  .side-foot select {
+    width: 100%; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+    padding: 7px 9px; font-size: 12.5px; font-family: inherit;
+    margin-bottom: 7px; border-radius: 0;
+  }
+  .side-foot select:focus { outline: none; border-color: var(--dg-accent); }
+  .side-foot select:disabled { opacity: .5; }
+  .side-foot .state { font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
+  .side-foot .state.ok { color: var(--ok); }
+  .side-foot .state.err { color: var(--dg-danger); }
+  .side-foot.warn { background: var(--dg-accent-soft); }
+
+  /* ================= 主区 ================= */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  header.bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 26px; border-bottom: 1px solid var(--rule);
+    background: var(--paper); flex: none;
+  }
+  header.bar .crumb {
+    font-size: 11px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  header.bar .crumb b { color: var(--ink); font-weight: 700; }
+  header.bar .spacer { flex: 1; }
+
+  .btn {
+    border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+    padding: 9px 18px; font-size: 12.5px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    cursor: pointer; font-family: inherit; border-radius: 0;
+    transition: background .12s, color .12s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--ink); color: var(--paper); }
+  .btn.primary { background: var(--dg-accent); color: var(--on-accent); border-color: var(--dg-accent); }
+  .btn.primary:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--paper); color: var(--ink); }
+
+  /* 导出下拉 */
+  .dropdown { position: relative; }
+  .menu {
+    display: none; position: absolute; right: 0; top: calc(100% + 8px); z-index: 40;
+    background: var(--paper); border: 1px solid var(--rule);
+    min-width: 200px; padding: 0;
+  }
+  .menu.on { display: block; }
+  .menu .mi {
+    display: block; width: 100%; text-align: left; border: none; background: transparent;
+    padding: 11px 14px; font-size: 12.5px; font-family: inherit;
+    color: var(--ink); cursor: pointer; border-radius: 0;
+  }
+  .menu .mi:hover { background: var(--ink); color: var(--paper); }
+  .menu .mi .ext {
+    color: var(--ink-faint); font-size: 10.5px; float: right;
+    font-weight: 700; letter-spacing: .06em;
+  }
+  .menu .mi:hover .ext { color: #bbb; }
+  .menu .sep { height: 1px; background: var(--rule-soft); margin: 0; }
+
+  section.content { flex: 1; overflow-y: auto; min-height: 0; scroll-behavior: smooth; }
+
+  /* 整页阅读形态 */
+  .reader { width: 100%; max-width: 1120px; margin: 0 auto; padding: 44px 56px 110px; }
+  @media (min-width: 1560px) { .reader { max-width: 1260px; padding-left: 72px; padding-right: 72px; } }
+  @media (max-width: 900px) { .reader { padding: 30px 26px 80px; } }
+
+  /* 进度 */
+  .progress {
+    display: none; align-items: center; gap: 12px;
+    padding: 14px 18px; margin-bottom: 26px;
+    border: 1px solid var(--rule); border-left: 6px solid var(--dg-accent);
+    font-size: 13.5px;
+  }
+  .progress.on { display: flex; }
+  .spin {
+    width: 14px; height: 14px; border: 2px solid var(--dg-accent);
+    border-top-color: transparent; border-radius: 50%;
+    animation: sp .8s linear infinite; flex: none;
+  }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .progress .steps {
+    color: var(--ink-faint); font-size: 12px; margin-left: auto;
+    font-weight: 700; letter-spacing: .08em;
+  }
+
+  /* ---------- 日报内容 ----------
+     排版与颜色全部由渲染器（lib/render/styles.js）提供。
+     这里**不得重定义 --dg-***，两个原因：
+       1. .digest 的特异性高于渲染器的 :root[data-color-mode="dark"]，
+          重定义会把深色模式的高对比文字顶掉，深色主题下变成深字深底；
+       2. 宿主主题的 --text 是为它自己的 UI 选的（暖纸是深灰），
+          拿来做正文会把对比度拉回去。
+     因此日报只跟宿主的**背景与主色**，文字按明暗取高对比值。 */
+  .digest .section { scroll-margin-top: 20px; }  .digest .section { scroll-margin-top: 20px; }
+
+  /* 空态 */
+  .placeholder { padding: 100px 24px; color: var(--ink-faint); }
+  .placeholder .big {
+    font-size: 13px; color: var(--ink); margin-bottom: 12px;
+    font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  }
+  .placeholder .sub { font-size: 13.5px; line-height: 1.85; color: var(--ink-soft); }
+
+  .err {
+    padding: 16px 20px; border: 1px solid var(--rule);
+    border-left: 6px solid var(--dg-danger);
+    color: var(--ink); font-size: 13.5px; line-height: 1.72;
+  }
+
+  /* 搜索结果 */
+  .sr { border-bottom: 1px solid var(--rule-soft); padding: 18px 0; }
+  .sr:last-child { border-bottom: none; }
+  .sr .sr-date {
+    font-size: 11px; color: var(--ink); font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+    margin-bottom: 10px; cursor: pointer;
+  }
+  .sr .sr-date:hover { color: var(--dg-accent-text); }
+  .sr .sr-hit {
+    font-size: 13.5px; line-height: 1.68; margin-bottom: 7px;
+    padding-left: 13px; border-left: 2px solid var(--rule-soft);
+  }
+  .sr .sr-hit .k {
+    font-size: 10px; color: var(--ink-faint); margin-right: 8px;
+    font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  }
+  mark { background: var(--dg-accent-soft); color: var(--ink); padding: 0 2px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- ============ 左侧导航 ============ -->
+  <nav class="side">
+    <div class="side-head">
+      <div class="brand">
+        <span class="mark"></span>
+        <h1>日报</h1>
+      </div>
+      <div class="search-box">
+        <input id="search" type="search" placeholder="搜索标题、要点、点评" autocomplete="off">
+      </div>
+    </div>
+
+    <div class="side-scroll">
+      <div class="nav-sec toc-sec" id="tocSec" style="display:none">
+        <div class="nav-title">本期目录</div>
+        <div class="toc" id="toc"></div>
+      </div>
+
+      <div class="nav-sec arch-sec">
+        <div class="nav-title">往期归档</div>
+        <div class="list" id="list"></div>
+      </div>
+    </div>
+
+    <div class="side-foot" id="sideFoot">
+      <div class="lbl">模型</div>
+      <select id="selProvider"><option value="">载入中…</option></select>
+      <select id="selModel" disabled><option value="">—</option></select>
+      <div class="state" id="modelState"></div>
+    </div>
+  </nav>
+
+  <!-- ============ 主区 ============ -->
+  <div class="main">
+    <header class="bar">
+      <span class="crumb" id="crumb">未打开任何一期</span>
+      <span class="spacer"></span>
+      <div class="dropdown">
+        <button class="btn" id="btnExport" disabled>导出</button>
+        <div class="menu" id="exportMenu">
+          <button class="mi" data-fmt="html">网页<span class="ext">.html</span></button>
+          <button class="mi" data-fmt="md">Markdown<span class="ext">.md</span></button>
+          <button class="mi" data-fmt="docx">Word 文档<span class="ext">.docx</span></button>
+          <div class="sep"></div>
+          <button class="mi" data-fmt="pdf">PDF<span class="ext">打印后另存</span></button>
+        </div>
+      </div>
+      <button class="btn primary" id="btnRun">生成今日日报</button>
+    </header>
+
+    <section class="content" id="content">
+      <div class="reader">
+        <div class="progress" id="progress">
+          <span class="spin"></span>
+          <span id="progressMsg">准备中…</span>
+          <span class="steps" id="progressSteps"></span>
+        </div>
+        <div id="view">
+          <div class="placeholder">
+            <div class="big">还没有日报</div>
+            <div class="sub">点右上角「生成今日日报」跑第一期。<br>跑完会按日期归档在左侧，随时可翻。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script type="module">
+// 必须先 import SDK 并调用 hana.ready()：宿主收到这条 ready 消息才认页面就绪，
+// 5 秒内收不到就一律显示「应用加载失败」。
+import { hana } from "./assets/sdk.js";
+import { followHostTheme } from "./assets/theme-follow.js";
+hana.ready();
+followHostTheme(hana);
+
+const $ = (id) => document.getElementById(id);
+const view = $("view");
+const list = $("list");
+const toc = $("toc");
+const content = $("content");
+
+let currentIssue = null;
+let index = { entries: [] };
+let providers = [];
+let config = {};
+
+const esc = (s) => String(s ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+function apiPath(path) {
+  return `/api/apps/cyber-newspaper/routes${path}`;
+}
+function surfaceSession() {
+  return new URLSearchParams(location.search).get("appSurfaceSession") || "";
+}
+function authHeaders(extra) {
+  const h = new Headers(extra || {});
+  const ss = surfaceSession();
+  if (ss) h.set("X-Hana-App-Surface-Session", ss);
+  return h;
+}
+
+async function api(path, opts) {
+  const headers = authHeaders(opts?.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  const res = await fetch(apiPath(path), { ...opts, headers });
+  const text = await res.text().catch(() => "");
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+  if (data === null) {
+    // 以前这里只丢一句“响应不是合法 JSON”，把真错误全遮了。
+    // 现在把状态码与响应体开头一起带回来，至少能看出是 4xx/5xx 还是路由挂了。
+    const snippet = text.slice(0, 180).replace(/\s+/g, " ").trim();
+    return {
+      ok: false,
+      status: res.status,
+      error: `HTTP ${res.status}${res.statusText ? " " + res.statusText : ""}` +
+        (snippet ? `：${snippet}` : "（响应体为空或非 JSON）"),
+    };
+  }
+  if (!res.ok && data.ok !== false) data.ok = false;
+  return data;
+}
+
+// ---------- 模型选择 ----------
+function setModelState(text, cls = "") {
+  const el = $("modelState");
+  el.textContent = text;
+  el.className = "state" + (cls ? " " + cls : "");
+  $("sideFoot").classList.toggle("warn", cls === "err");
+}
+
+/**
+ * 宿主的 provider 标识符规则（与宿主 bundle 里同一条正则）。
+ * App 调用模型时 provider 不匹配就会被宿主直接拒。
+ */
+const ASCII_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+function renderProviderOptions(selected) {
+  const sel = $("selProvider");
+  if (!providers.length) {
+    sel.innerHTML = `<option value="">— 无可用供应商 —</option>`;
+    sel.disabled = true;
+    $("selModel").disabled = true;
+    setModelState("Hana 里还没配置模型供应商，请先到 Hana 设置里配置", "err");
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = `<option value="">— 选择供应商 —</option>` +
+    providers
+      .map((p) => {
+        // 不可寻址的供应商标出来并禁选：选了也调不动（实测中文名会被宿主拒）。
+        // 不隐藏它们，因为用户需要知道“为什么不能用”，而不是以为没配。
+        const usable = p.usable ?? ASCII_ID.test(p.provider);
+        const label = usable ? esc(p.label || p.provider) : `${esc(p.label || p.provider)}（名字含非 ASCII，无法调用）`;
+        return `<option value="${esc(p.provider)}" ${usable ? "" : "disabled"} ${p.provider === selected ? "selected" : ""}>${label}</option>`;
+      })
+      .join("");
+}
+
+function renderModelOptions(providerId, selected) {
+  const sel = $("selModel");
+  const p = providers.find((x) => x.provider === providerId);
+  if (!p) {
+    sel.innerHTML = `<option value="">—</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = p.models
+    .map((m) => `<option value="${esc(m.id)}" ${m.id === selected ? "selected" : ""}>${esc(m.name || m.id)}</option>`)
+    .join("");
+}
+
+async function saveModel(provider, model) {
+  setModelState("保存中…");
+  const r = await api("/api/digest/config", { method: "POST", body: JSON.stringify({ provider, model }) });
+  if (r.ok) {
+    // 以库里的值为准重建 config，不拿参数自己拼：后端可能做了默认值合并
+    config = r.config ?? { ...config, provider, model };
+    syncModelBar();
+    setModelState(`已保存：${config.provider} / ${config.model}`, "ok");
+  } else {
+    // 失败时把下拉框弹回真配置，不让界面显示一个没存进去的选择
+    syncModelBar();
+    setModelState(`保存失败：${r.error ?? "未知错误"}（仍在使用 ${config.provider ?? "未选"} / ${config.model ?? "未选"}）`, "err");
+  }
+}
+
+/**
+ * 把下拉框与状态行拉回 config 的真实值。
+ *
+ * 为什么需要：以前切换失败后下拉框停在新选项、状态行还是旧值，
+ * 两边各说各话 —— 这就是“模型和侧边栏没同步”。现在只认一个事实：config。
+ */
+function syncModelBar() {
+  renderProviderOptions(config.provider);
+  renderModelOptions(config.provider, config.model);
+  if (config.provider && config.model) setModelState(`${config.provider} / ${config.model}`);
+}
+
+/** 下拉框当前选的是不是已保存的那一对 */
+function selectedPair() {
+  return { provider: $("selProvider").value, model: $("selModel").value };
+}
+
+async function loadModelBar() {
+  const [pr, cf] = await Promise.all([api("/api/digest/providers"), api("/api/digest/config")]);
+  if (!pr.ok) {
+    providers = [];
+    renderProviderOptions(null);
+    setModelState(`读取供应商目录失败：${pr.error ?? "未知错误"}`, "err");
+    return;
+  }
+  providers = pr.providers ?? [];
+  if (!cf.ok) {
+    config = {};
+    renderProviderOptions(null);
+    setModelState(`读取配置失败：${cf.error ?? "未知错误"}`, "err");
+    return;
+  }
+  config = cf.config ?? {};
+  syncModelBar();
+  if (!config.provider || !config.model) {
+    setModelState(providers.length ? "尚未选择模型，生成前需先选定" : "Hana 里还没配置模型供应商", "err");
+  }
+}
+
+// ---------- 归档列表 ----------
+async function loadArchive() {
+  const r = await api("/api/digest/archive");
+  if (!r.ok) return;
+  index = r.index ?? { entries: [] };
+  renderList();
+}
+
+function renderList() {
+  if (!index.entries.length) {
+    list.innerHTML = `<div class="empty-list">还没有归档。<br>点右上角生成第一期。</div>`;
+    return;
+  }
+  list.innerHTML = index.entries.map((e) => `
+    <div class="entry" data-date="${esc(e.date)}">
+      <div><span class="d">${esc(e.date)}</span><span class="n">NO.${String(e.issueNo).padStart(3, "0")}</span></div>
+      <div class="t">${esc(e.title || "—")}</div>
+    </div>`).join("");
+  list.querySelectorAll(".entry").forEach((el) => {
+    el.onclick = () => openIssue(el.dataset.date);
+  });
+}
+
+// ---------- 本期目录 ----------
+function renderToc(issue) {
+  const sec = $("tocSec");
+  if (!issue?.sections?.length) {
+    sec.style.display = "none";
+    return;
+  }
+  sec.style.display = "";
+  toc.innerHTML = issue.sections.map((s, i) => `
+    <a class="toc-item" data-idx="${i}" href="#sec-${i}">
+      ${esc(s.title)}<span class="cnt">${s.items?.length ?? 0}</span>
+    </a>`).join("");
+
+  toc.querySelectorAll(".toc-item").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      const target = document.getElementById(`sec-${el.dataset.idx}`);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        toc.querySelectorAll(".toc-item").forEach((x) => x.classList.remove("on"));
+        el.classList.add("on");
+      }
+    };
+  });
+}
+
+// 滚动时高亮当前栏目
+let scrollRaf = null;
+content.addEventListener("scroll", () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = null;
+    if (!currentIssue?.sections?.length) return;
+    const items = toc.querySelectorAll(".toc-item");
+    if (!items.length) return;
+    let best = 0;
+    currentIssue.sections.forEach((_, i) => {
+      const el = document.getElementById(`sec-${i}`);
+      if (!el) return;
+      if (el.getBoundingClientRect().top - content.getBoundingClientRect().top <= 90) best = i;
+    });
+    items.forEach((x, i) => x.classList.toggle("on", i === best));
+  });
+});
+
+// ---------- 打开某期 ----------
+async function openIssue(date) {
+  list.querySelectorAll(".entry").forEach((e) => e.classList.toggle("on", e.dataset.date === date));
+  const r = await api(`/api/digest/issue/${date}`);
+  if (!r.ok) {
+    view.innerHTML = `<div class="err">读取失败：${esc(r.error)}</div>`;
+    return;
+  }
+  currentIssue = r.issue;
+  $("btnExport").disabled = false;
+  $("crumb").innerHTML = `NO.${String(r.issue.issueNo).padStart(3, "0")} · <b>${esc(r.issue.date)}</b>`;
+  view.innerHTML = `<div class="digest">${r.html}</div>`;
+  renderToc(r.issue);
+  content.scrollTop = 0;
+}
+
+// ---------- 生成 ----------
+$("btnRun").onclick = async () => {
+  const btn = $("btnRun");
+  btn.disabled = true;
+  const prog = $("progress");
+  prog.classList.add("on");
+  $("progressMsg").textContent = "抓取数据源…";
+  $("progressSteps").textContent = "";
+  view.innerHTML = "";
+  $("tocSec").style.display = "none";
+
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    $("progressSteps").textContent = `${((Date.now() - t0) / 1000).toFixed(0)}s`;
+  }, 500);
+
+  try {
+    const r = await api("/api/digest/run", { method: "POST" });
+    clearInterval(timer);
+    prog.classList.remove("on");
+    if (!r.ok) {
+      const needModel = /供应商|模型/.test(r.error ?? "");
+      view.innerHTML = `<div class="err"><b>生成失败</b><br>${esc(r.error)}` +
+        (needModel ? `<br><br>在左下角选择一个供应商和模型，然后重试。` : "") + `</div>`;
+      return;
+    }
+    currentIssue = r.issue;
+    $("btnExport").disabled = false;
+    $("crumb").innerHTML = `NO.${String(r.issue.issueNo).padStart(3, "0")} · <b>${esc(r.issue.date)}</b>`;
+    view.innerHTML = `<div class="digest">${r.html}</div>`;
+    renderToc(r.issue);
+    await loadArchive();
+    list.querySelectorAll(".entry").forEach((e) => e.classList.toggle("on", e.dataset.date === r.issue.date));
+    content.scrollTop = 0;
+    if (r.warnings?.length) {
+      view.insertAdjacentHTML("afterbegin",
+        `<div class="progress on" style="display:flex"><span>生成完成，有 ${r.warnings.length} 条提示已自动处理。</span></div>`);
+    }
+  } catch (e) {
+    clearInterval(timer);
+    prog.classList.remove("on");
+    view.innerHTML = `<div class="err"><b>生成失败</b><br>${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// ---------- 导出 ----------
+const menu = $("exportMenu");
+$("btnExport").onclick = (e) => {
+  e.stopPropagation();
+  menu.classList.toggle("on");
+};
+document.addEventListener("click", () => menu.classList.remove("on"));
+
+menu.querySelectorAll(".mi").forEach((el) => {
+  el.onclick = async (e) => {
+    e.stopPropagation();
+    menu.classList.remove("on");
+    if (!currentIssue) return;
+    const fmt = el.dataset.fmt;
+    const date = currentIssue.date;
+
+    if (fmt === "pdf") {
+      // PDF 走打印视图：宿主渲染需要 callToken，工作台拿不到，
+      // 用浏览器打印替代，零授权、零额度消耗。
+      openPrintView(date);
+      return;
+    }
+
+    try {
+      const res = await fetch(apiPath(`/api/digest/export/${date}/${fmt}`), {
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert(`导出失败：${j.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") || "";
+      const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+      const name = m ? decodeURIComponent(m[1]) : `赛博报纸_${date}.${fmt}`;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } catch (err) {
+      alert(`导出失败：${err.message}`);
+    }
+  };
+});
+
+/** 打开打印视图 */
+async function openPrintView(date) {
+  try {
+    const res = await fetch(apiPath(`/api/digest/export/${date}/pdf`), { headers: authHeaders() });
+    if (!res.ok) {
+      alert(`准备打印失败：HTTP ${res.status}`);
+      return;
+    }
+    const html = await res.text();
+    const w = window.open("", "_blank");
+    if (!w) {
+      alert("浏览器拦截了新窗口。请允许弹出窗口后重试，或改用 HTML 导出。");
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.addEventListener("load", () => {
+      setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 350);
+    });
+    setTimeout(() => { try { if (!w.closed) { w.focus(); w.print(); } } catch {} }, 900);
+  } catch (e) {
+    alert(`准备打印失败：${e.message}`);
+  }
+}
+
+// ---------- 搜索 ----------
+let searchTimer = null;
+$("search").oninput = (e) => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  if (!q) { renderList(); return; }
+  searchTimer = setTimeout(() => doSearch(q), 260);
+};
+
+async function doSearch(q) {
+  const r = await api(`/api/digest/search?q=${encodeURIComponent(q)}`);
+  $("tocSec").style.display = "none";
+  $("crumb").innerHTML = `搜索「${esc(q)}」`;
+  if (!r.ok || !r.results?.length) {
+    view.innerHTML = `<div class="placeholder">
+      <div class="big">无匹配结果</div>
+      <div class="sub">「${esc(q)}」没有命中任何内容。<br>搜索范围：要点、栏目名、条目标题、点评</div></div>`;
+    return;
+  }
+  const kindName = { highlight: "要点", section: "栏目", item: "条目" };
+  const hl = (text) => {
+    const t = esc(text);
+    return t.replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>");
+  };
+  view.innerHTML = `<div>
+    <div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:18px">
+      「${esc(q)}」命中 ${r.results.length} 期</div>
+    ${r.results.map((res) => `
+      <div class="sr">
+        <div class="sr-date" data-date="${esc(res.date)}">${esc(res.date)} · NO.${String(res.issueNo).padStart(3, "0")}</div>
+        ${res.hits.slice(0, 8).map((h) => `
+          <div class="sr-hit">
+            <span class="k">${kindName[h.kind] ?? ""}</span>${hl(h.text)}
+            ${h.note ? `<div style="color:var(--ink-faint);font-size:12.5px;margin-top:3px">${hl(h.note)}</div>` : ""}
+          </div>`).join("")}
+      </div>`).join("")}
+  </div>`;
+  view.querySelectorAll(".sr-date").forEach((el) => {
+    el.onclick = () => { $("search").value = ""; openIssue(el.dataset.date); };
+  });
+}
+
+// ---------- 交互绑定 ----------
+$("selProvider").onchange = (e) => {
+  const p = e.target.value;
+  renderModelOptions(p, null);
+  // 先告诉用户“还没存”，避免选了以录却以为已生效
+  setModelState("选择未保存，选定模型后自动保存…");
+  const first = providers.find((x) => x.provider === p)?.models?.[0];
+  if (first) { $("selModel").value = first.id; saveModel(p, first.id); }
+  else syncModelBar();
+};
+$("selModel").onchange = (e) => {
+  const p = $("selProvider").value;
+  if (p && e.target.value) saveModel(p, e.target.value);
+  else syncModelBar();
+};
+
+// ---------- 启动 ----------
+loadArchive();
+loadModelBar();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# 依赖（本项目不装 npm 包，sdk/ 是随包分发的官方副本，必须提交）
+node_modules/
+
+# 发布产物：由 pack.ps1 生成，随时可重建
+dist-extensions/
+
+# 开发期验证产物：截图、预览 HTML、导出样本、临时浏览器数据
+# 脚本一跑就有，不进版本库
+probe/out/
+
+# 编辑器与系统杂物
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# 日志与临时文件
+*.log
+*.tmp

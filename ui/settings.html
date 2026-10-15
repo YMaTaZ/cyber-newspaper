@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>日报 · 设置</title>
+<style>
+  /* 瑞士国际主义 + 宿主主题跟随。--hana-* 由 assets/theme-follow.js 从宿主搬来。
+     只跟背景与主色；文字按明暗取高对比值（宿主 --text 是为它自己 UI 选的）。 */
+  :root {
+    --paper:     var(--hana-bg, var(--bg, #FFFFFF));
+    --panel:     var(--hana-bg-card, var(--bg-card, var(--hana-bg, var(--bg, #FFFFFF))));
+    --ink: #000000;
+    --ink-body: #111111;
+    --ink-soft: #333333;
+    --ink-faint: #5A5A5A;
+    --dg-accent:        var(--hana-accent, var(--accent, #2E5F80));
+    --dg-accent-soft: color-mix(in srgb, var(--dg-accent) 12%, transparent);
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, var(--ink));
+    --on-accent: #FFFFFF;
+    --rule: #000000;
+    --rule-soft: var(--hana-border, var(--border, #C8C8C8));
+    --dg-danger: #A81E28; --ok: #166534;
+  }
+  :root[data-color-mode="dark"] {
+    --ink: #FFFFFF;
+    --ink-body: #F2F2F2;
+    --ink-soft: #D6D6D6;
+    --ink-faint: #C2C2C2;
+    --rule: #FFFFFF;
+    --rule-soft: rgba(255, 255, 255, 0.24);
+    --dg-accent-soft: color-mix(in srgb, var(--dg-accent) 22%, transparent);
+    --dg-accent-text: color-mix(in srgb, var(--dg-accent) 70%, #FFFFFF);
+    --dg-danger: #E58A8A; --ok: #8CC790;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--paper); color: var(--ink-body);
+    font-family: "Helvetica Neue", Helvetica, Arial, "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-weight: 400; font-size: 14px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 44em; margin: 0 auto; padding: 40px 28px 80px; }
+
+  h1 { font-size: 26px; font-weight: 700; margin: 0 0 8px; letter-spacing: -0.02em; color: var(--ink); }
+  .sub { color: var(--ink-faint); font-size: 13px; margin-bottom: 36px; line-height: 1.7; }
+
+  .card { border-top: 3px solid var(--rule); padding: 22px 0 8px; margin-bottom: 26px; }
+  .card > h2 {
+    font-size: 11px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--dg-accent-text);
+    margin: 0 0 6px;
+  }
+  .card > .hint { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 20px; line-height: 1.68; }
+
+  .field { margin-bottom: 20px; }
+  .field:last-child { margin-bottom: 12px; }
+  .field label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; color: var(--ink); }
+  .field .desc { font-size: 12px; color: var(--ink-faint); margin-bottom: 9px; line-height: 1.62; }
+  select, input[type=number], input[type=text] {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--rule);
+    font-size: 13.5px; font-family: inherit; border-radius: 0;
+    background: var(--paper); color: var(--ink);
+  }
+  select:focus, input:focus { outline: none; border-color: var(--dg-accent); }
+  select:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
+
+  .current {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px; border: 1px solid var(--rule);
+    border-left: 6px solid var(--dg-accent);
+    font-size: 13px; margin-bottom: 20px;
+  }
+  .current .dot { width: 8px; height: 8px; background: var(--dg-accent); flex: none; }
+  .current.warn { border-left-color: var(--dg-danger); }
+  .current.warn .dot { background: var(--dg-danger); }
+  .current .k { color: var(--ink-faint); }
+
+  .toggles { display: flex; flex-direction: column; }
+  .tg {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 14px 0; border-bottom: 1px solid var(--rule-soft);
+  }
+  .tg:last-child { border-bottom: none; }
+  .tg input { margin-top: 3px; flex: none; width: 16px; height: 16px; accent-color: var(--dg-accent); }
+  .tg .body { flex: 1; }
+  .tg .name { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; color: var(--ink); }
+  .tg .d { font-size: 12px; color: var(--ink-faint); line-height: 1.62; }
+  .tg .badge {
+    font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--dg-accent-text); margin-left: 8px;
+  }
+
+  .srcs { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 22px; }
+  .src {
+    display: flex; align-items: center; gap: 9px; padding: 8px 0;
+    font-size: 13px; border-bottom: 1px solid var(--rule-soft);
+  }
+  .src input { width: 16px; height: 16px; accent-color: var(--dg-accent); flex: none; }
+  .src .lang {
+    font-size: 9.5px; font-weight: 700; letter-spacing: .08em;
+    color: var(--ink-faint); margin-left: auto;
+  }
+  .src .lang.en { color: var(--dg-accent-text); }
+
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 32px; padding-top: 22px; border-top: 3px solid var(--rule); }
+  .btn {
+    border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+    padding: 10px 20px; font-size: 12px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; cursor: pointer; font-family: inherit; border-radius: 0;
+  }
+  .btn:hover { background: var(--ink); color: var(--paper); }
+  .btn.primary { background: var(--dg-accent); color: var(--on-accent); border-color: var(--dg-accent); }
+  .btn.primary:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--paper); color: var(--ink); }
+  .save-state { font-size: 12.5px; color: var(--ink-faint); }
+  .save-state.ok { color: var(--ok); font-weight: 700; }
+  .save-state.err { color: var(--dg-danger); font-weight: 700; }
+
+  .err-box {
+    padding: 14px 16px; border: 1px solid var(--rule); border-left: 6px solid var(--dg-danger);
+    color: var(--ink); font-size: 13px; line-height: 1.7; margin-bottom: 22px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>日报</h1>
+  <div class="sub">日报的生成、归档与查看在工作台里完成。这里是它的配置。</div>
+
+  <div id="errBox"></div>
+
+  <!-- 模型供应商 -->
+  <div class="card">
+    <h2>模型供应商</h2>
+    <div class="hint">
+      自动读取你在 Hana 里已配置的供应商。日报的编辑整理由你选定的模型完成。
+      App 不会接触任何 API Key。
+    </div>
+    <div class="current" id="curModel">
+      <span class="dot"></span><span id="curModelText">读取中…</span>
+    </div>
+    <div class="field">
+      <label for="provider">供应商</label>
+      <select id="provider"><option value="">— 请选择 —</option></select>
+    </div>
+    <div class="field">
+      <label for="model">模型</label>
+      <div class="desc">列表来自宿主目录。选中的模型 id 会原样传递，不做任何改写。</div>
+      <select id="model" disabled><option value="">— 请先选供应商 —</option></select>
+    </div>
+  </div>
+
+  <!-- 数据源 -->
+  <div class="card">
+    <h2>数据源</h2>
+    <div class="hint">
+      默认全部开启。中文优先指输出语言，不代表只抓中文源。
+      关掉的源不会参与抓取，也不会出现在日报的来源标记里。
+    </div>
+    <div class="srcs" id="srcList"></div>
+  </div>
+
+  <!-- 内容 -->
+  <div class="card">
+    <h2>内容</h2>
+    <div class="field">
+      <label for="lang">输出语言</label>
+      <select id="lang">
+        <option value="zh">中文（英文源标题译成中文，专有名词保留原文）</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="maxCandidates">候选条目上限</label>
+      <div class="desc">进入编辑层的条目数量上限。越多信息越全，但模型消耗越高。默认 40。</div>
+      <input id="maxCandidates" type="number" min="10" max="100" step="5">
+    </div>
+    <div class="field">
+      <label for="windowHours">抓取时间窗口</label>
+      <div class="desc">默认 24 小时。某源在窗口内不足 3 条时，该源会自动放宽到 48 小时。</div>
+      <select id="windowHours">
+        <option value="24">24 小时</option>
+        <option value="48">48 小时</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 入口开关 -->
+  <div class="card">
+    <h2>入口</h2>
+    <div class="hint">工作台始终可用。下面几个是额外入口，默认关闭。</div>
+    <div class="toggles">
+      <label class="tg">
+        <input type="checkbox" id="enableSessionEntry">
+        <span class="body">
+          <span class="name">会话内触发<span class="badge">默认关</span></span>
+          <span class="d">允许在对话里说「日报」来生成，同时产出 PDF。</span>
+        </span>
+      </label>
+      <label class="tg">
+        <input type="checkbox" id="enableBridgePush">
+        <span class="body">
+          <span class="name">桥接推送<span class="badge">默认关</span></span>
+          <span class="d">允许从微信 / 飞书等已桥接的会话触发。日报会作为文件回送到该会话。
+            需要先在 Hana 里桥接对应通道。</span>
+        </span>
+      </label>
+      <label class="tg">
+        <input type="checkbox" id="enableDesktopNotify">
+        <span class="body">
+          <span class="name">完成时桌面通知<span class="badge">默认关</span></span>
+          <span class="d">仅对会话内触发生效。工作台生成不会推送任何通知。</span>
+        </span>
+      </label>
+      <label class="tg">
+        <input type="checkbox" id="keepHtmlSnapshot">
+        <span class="body">
+          <span class="name">保留每期 HTML 快照</span>
+          <span class="d">在归档目录同时保存一份单文件 HTML，方便直接分享。</span>
+        </span>
+      </label>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn primary" id="btnSave">保存</button>
+    <button class="btn" id="btnReload">重新读取</button>
+    <span class="save-state" id="saveState"></span>
+  </div>
+</div>
+
+<script type="module">
+// 必须先 import SDK 并调用 hana.ready()：宿主收到这条 ready 消息才认页面就绪，
+// 5 秒内收不到就一律显示「应用加载失败」。
+import { hana } from "./assets/sdk.js";
+import { followHostTheme } from "./assets/theme-follow.js";
+hana.ready();
+followHostTheme(hana);
+
+const $ = (id) => document.getElementById(id);
+
+const SOURCES = [
+  { id: "hn", name: "Hacker News", lang: "en" },
+  { id: "github", name: "GitHub 新仓库", lang: "en" },
+  { id: "arxiv", name: "arXiv cs.AI", lang: "en" },
+  { id: "qbitai", name: "量子位", lang: "zh" },
+  { id: "infoq", name: "InfoQ 中国", lang: "zh" },
+  { id: "techcrunch", name: "TechCrunch AI", lang: "en" },
+  { id: "ars", name: "Ars Technica AI", lang: "en" },
+  { id: "openai", name: "OpenAI Blog", lang: "en" },
+];
+
+let providers = [];
+let config = {};
+
+function apiPath(path) { return `/api/apps/cyber-newspaper/routes${path}`; }
+function authHeaders(extra) {
+  const h = new Headers(extra || {});
+  const ss = new URLSearchParams(location.search).get("appSurfaceSession") || "";
+  if (ss) h.set("X-Hana-App-Surface-Session", ss);
+  return h;
+}
+async function api(path, opts) {
+  const headers = authHeaders(opts?.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  const res = await fetch(apiPath(path), { ...opts, headers });
+  const text = await res.text().catch(() => "");
+  try {
+    return JSON.parse(text);
+  } catch {
+    // 与工作台同理：把状态码和响应体开头带回来，不要用固定文案遮住真错误
+    const snippet = text.slice(0, 180).replace(/\s+/g, " ").trim();
+    return {
+      ok: false,
+      status: res.status,
+      error: `HTTP ${res.status}${res.statusText ? " " + res.statusText : ""}` +
+        (snippet ? `：${snippet}` : "（响应体为空或非 JSON）"),
+    };
+  }
+}
+
+function showError(msg) {
+  $("errBox").innerHTML = msg ? `<div class="err-box">${msg}</div>` : "";
+}
+
+function renderSources(enabledIds) {
+  const on = enabledIds ?? SOURCES.map((s) => s.id);
+  $("srcList").innerHTML = SOURCES.map((s) => `
+    <label class="src">
+      <input type="checkbox" data-src="${s.id}" ${on.includes(s.id) ? "checked" : ""}>
+      <span>${s.name}</span>
+      <span class="lang ${s.lang}">${s.lang === "zh" ? "中" : "EN"}</span>
+    </label>`).join("");
+}
+
+function renderProviders() {
+  const sel = $("provider");
+  if (!providers.length) {
+    sel.innerHTML = `<option value="">— 目录里没有可用供应商 —</option>`;
+    showError("Hana 里还没有配置任何模型供应商。请先到 Hana 设置里配置一个，再回到这里选择。");
+    return;
+  }
+  sel.innerHTML = `<option value="">— 请选择 —</option>` +
+    providers.map((p) => `<option value="${p.provider}">${p.provider}（${p.models.length} 个模型）</option>`).join("");
+}
+
+function renderModels(providerId, selectedModel) {
+  const sel = $("model");
+  const p = providers.find((x) => x.provider === providerId);
+  if (!p) {
+    sel.innerHTML = `<option value="">— 请先选供应商 —</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = p.models
+    .map((m) => `<option value="${m.id}" ${m.id === selectedModel ? "selected" : ""}>${m.name || m.id}</option>`)
+    .join("");
+}
+
+function renderCurrent() {
+  const box = $("curModel");
+  const txt = $("curModelText");
+  if (config.provider && config.model) {
+    box.classList.remove("warn");
+    txt.innerHTML = `当前使用：<b>${config.provider}</b> / <b>${config.model}</b>`;
+  } else {
+    box.classList.add("warn");
+    txt.textContent = "尚未选择模型。生成日报前必须先选定一个。";
+  }
+}
+
+async function load() {
+  showError("");
+  $("saveState").textContent = "";
+
+  const [pr, cf] = await Promise.all([api("/api/digest/providers"), api("/api/digest/config")]);
+
+  if (pr.ok) providers = pr.providers ?? [];
+  else showError(`读取供应商目录失败：${pr.error ?? "未知错误"}`);
+  renderProviders();
+
+  if (!cf.ok) {
+    showError(`读取配置失败：${cf.error ?? "未知错误"}`);
+    return;
+  }
+  config = cf.config ?? {};
+
+  renderSources(config.enabledSources);
+  $("lang").value = config.lang ?? "zh";
+  $("maxCandidates").value = config.maxCandidates ?? 40;
+  $("windowHours").value = String(config.windowHours ?? 24);
+  $("enableSessionEntry").checked = !!config.enableSessionEntry;
+  $("enableBridgePush").checked = !!config.enableBridgePush;
+  $("enableDesktopNotify").checked = !!config.enableDesktopNotify;
+  $("keepHtmlSnapshot").checked = config.keepHtmlSnapshot !== false;
+
+  if (config.provider) {
+    $("provider").value = config.provider;
+    renderModels(config.provider, config.model);
+  } else {
+    renderModels("", null);
+  }
+  renderCurrent();
+}
+
+$("provider").onchange = (e) => {
+  renderModels(e.target.value, null);
+  renderCurrent();
+};
+$("model").onchange = () => {
+  config.provider = $("provider").value;
+  config.model = $("model").value;
+  renderCurrent();
+};
+
+$("btnSave").onclick = async () => {
+  const btn = $("btnSave");
+  btn.disabled = true;
+  $("saveState").textContent = "保存中…";
+  $("saveState").className = "save-state";
+
+  const enabled = [...document.querySelectorAll("[data-src]")]
+    .filter((c) => c.checked)
+    .map((c) => c.dataset.src);
+
+  const patch = {
+    provider: $("provider").value || null,
+    model: $("model").value || null,
+    lang: $("lang").value,
+    maxCandidates: Number($("maxCandidates").value) || 40,
+    windowHours: Number($("windowHours").value) || 24,
+    enabledSources: enabled.length === SOURCES.length ? null : enabled,
+    enableSessionEntry: $("enableSessionEntry").checked,
+    enableBridgePush: $("enableBridgePush").checked,
+    enableDesktopNotify: $("enableDesktopNotify").checked,
+    keepHtmlSnapshot: $("keepHtmlSnapshot").checked,
+  };
+
+  const r = await api("/api/digest/config", { method: "POST", body: JSON.stringify(patch) });
+  btn.disabled = false;
+  if (r.ok) {
+    config = r.config;
+    renderCurrent();
+    $("saveState").textContent = "已保存";
+    $("saveState").className = "save-state ok";
+    setTimeout(() => { $("saveState").textContent = ""; }, 2600);
+  } else {
+    $("saveState").textContent = `保存失败：${r.error ?? "未知错误"}`;
+    $("saveState").className = "save-state err";
+  }
+};
+
+$("btnReload").onclick = load;
+
+load();
+</script>
+</body>
+</html>
