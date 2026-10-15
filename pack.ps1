@@ -1,34 +1,56 @@
-﻿# 打包脚本：排除开发物，产出可发布的 zip
+﻿# 打包脚本：产出可发布的 zip 与配套 entry.json
 #
-# 为什么需要它：probe/ 与 SPEC.md 是开发期产物，不该进用户的应用目录。
-# 官方 pack_app.mjs 会打包整个目录，所以这里先暂存开发物，打完再恢复。
+# 为什么需要它：官方打包器会把整个目录打进去，而仓库里有一堆不该随包分发的东西
+# （probe/ 开发脚本、SPEC.md 设计文档、pack.ps1 自己、.git 提交历史、
+#  README/LICENSE 仓库文档）。所以这里先暂存、打完再恢复。
+#
+# 关键约束：entry.json 里的 archive.size / archive.sha256 是**打包时**算的，
+# 打包之后一个字节都不能再动 —— 市场按这两个值校验，对不上就装不上。
+# 因此本脚本**不做任何事后修改 zip 的动作**，只靠打包前的暂存来保证内容干净。
+# （旧版用 strip-dev-from-zip.ps1 事后删文件，导致声明的 size 比实际大一倍。）
 #
 # 用法：pwsh -File pack.ps1 -Publisher "Your Name"
 
 param(
-  # 发布者名，会写进包的 entry.json 与市场登记。不传则用占位值。
+  # 发布者名，写进 entry.json 与市场登记。
   [string]$Publisher = "Cyber Newspaper Authors"
 )
 
 $ErrorActionPreference = "Continue"
 
 $root  = $PSScriptRoot
-$stash = Join-Path $env:TEMP "digest-pack-stash-$(Get-Random)"
-$devItems = @("probe", "SPEC.md")
-# 脚手架位置：随 hana-app-creator 技能安装，可用 HANA_HOME 覆盖。
-$hanaHome = if ($env:HANA_HOME) { $env:HANA_HOME } else { Join-Path $env:USERPROFILE ".hanako" }
-$creator = Join-Path $hanaHome "skills\hana-app-creator"
+$stash = Join-Path $env:TEMP "cns-pack-stash-$(Get-Random)"
 
-if (-not (Test-Path -LiteralPath (Join-Path $creator "scripts\pack_app.mjs"))) {
-  Write-Host "找不到打包器：$creator\scripts\pack_app.mjs" -ForegroundColor Red
-  Write-Host "请先安装 hana-app-creator 技能，或用 HANA_HOME 指向正确的 Hana 目录。" -ForegroundColor Yellow
+# 不该进包的：开发物 + 仓库文档 + 版本控制
+# .git 尤其要命：它含完整提交历史，打进包等于把仓库历史随安装包分发。
+$devItems = @("probe", "SPEC.md", "pack.ps1", ".git", "LICENSE", "README.md", ".gitignore")
+
+# 官方打包器位置。优先用 server 自带的（版本与宿主一致），回退到技能里的。
+$hanaHome = if ($env:HANA_HOME) { $env:HANA_HOME } else { Join-Path $env:USERPROFILE ".hanako" }
+$packer = $null
+$srvRoot = Join-Path $hanaHome "artifacts\server"
+if (Test-Path -LiteralPath $srvRoot) {
+  $newest = Get-ChildItem -LiteralPath $srvRoot -Directory -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($newest) {
+    $cand = Join-Path $newest.FullName "scripts\extension-pack.mjs"
+    if (Test-Path -LiteralPath $cand) { $packer = $cand }
+  }
+}
+if (-not $packer) {
+  $cand = Join-Path $hanaHome "skills\hana-app-creator\scripts\pack_app.mjs"
+  if (Test-Path -LiteralPath $cand) { $packer = $cand }
+}
+if (-not $packer) {
+  Write-Host "找不到打包器。请安装 hana-app-creator 技能，或用 HANA_HOME 指向 Hana 目录。" -ForegroundColor Red
   exit 1
 }
 
 Write-Host "打包 赛博报纸" -ForegroundColor Cyan
 Write-Host "  源目录：$root"
+Write-Host "  打包器：$packer"
 
-# 1. 暂存开发物
+# 1. 暂存不该进包的东西
 New-Item -ItemType Directory -Force -Path $stash | Out-Null
 $moved = @()
 foreach ($item in $devItems) {
@@ -41,53 +63,21 @@ foreach ($item in $devItems) {
 Write-Host "  已暂存：$($moved -join ', ')"
 
 try {
-  # 2. 静态校验
-  Write-Host "`n静态校验…" -ForegroundColor Cyan
-  $out = (& node "$creator\scripts\validate_app.mjs" --dir $root --json 2>$null | Out-String)
-  $json = ($out -split "`n" | Where-Object { $_.TrimStart().StartsWith("{") } | Select-Object -First 1)
-  if ($json) {
-    $r = $json | ConvertFrom-Json
-    if ($r.summary.errors -gt 0) {
-      Write-Host "  校验失败，$($r.summary.errors) 个错误：" -ForegroundColor Red
-      $r.issues | Where-Object { $_.severity -eq "error" } | ForEach-Object { Write-Host "    [$($_.code)] $($_.message)" }
-      throw "静态校验未通过，已中止打包。"
-    }
-    Write-Host "  通过（$($r.summary.errors) 错误 / $($r.summary.warnings) 警告）" -ForegroundColor Green
-  } else {
-    Write-Host "  未能解析校验输出，继续打包。" -ForegroundColor Yellow
-  }
-
-  # 3. 打包
+  # 2. 打包（官方打包器自带静态校验，校验不过会非零退出）
   Write-Host "`n打包…" -ForegroundColor Cyan
   $dist = Join-Path $root "dist-extensions"
   if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
-  (& node "$creator\scripts\pack_app.mjs" --dir $root --publisher $Publisher --out $dist 2>$null) |
-    Where-Object { $_ -match "wrote|error|Error" } | ForEach-Object { Write-Host "  $_" }
+  New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-  # 4. 核验包内不含开发物
-  $zip = Get-ChildItem $dist -Filter "*.zip" | Select-Object -First 1
-  if ($zip) {
-    Write-Host "`n产物：$($zip.FullName)" -ForegroundColor Green
-    Write-Host "  大小：$("{0:N0} KB" -f ($zip.Length / 1KB))"
-    try {
-      $list = & tar -tf $zip.FullName
-      $bad = $list | Where-Object { $_ -match "^(probe/|SPEC\.md)" }
-      if ($bad) {
-        Write-Host "  警告：包内仍含开发物：" -ForegroundColor Yellow
-        $bad | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" }
-      } else {
-        Write-Host "  开发物检查：通过（不含 probe/ 与 SPEC.md）" -ForegroundColor Green
-      }
-    } catch {
-      Write-Host "  (tar 不可用，跳过包内容检查)" -ForegroundColor Yellow
-    }
-  }
+  & node $packer --kind app --dir $root --publisher $Publisher --out $dist 2>&1 |
+    Where-Object { $_ -match "wrote|error|Error|fail" } | ForEach-Object { Write-Host "  $_" }
+  if ($LASTEXITCODE -ne 0) { throw "打包失败（exit $LASTEXITCODE）。" }
 }
 finally {
-  # 5. 恢复开发物
+  # 3. 恢复暂存项
   #
-  # 为什么不能直接 Move-Item：目标目录已存在时，PowerShell 会把源**当子项移进去**，
-  # 得到 probe\probe\ —— 不报错，但源码目录静默结坏（本次真发生过，
+  # 为什么不能直接 Move-Item：目标已存在时 PowerShell 会把源**当子项移进去**，
+  # 得到 probe\probe\ —— 不报错，但源码目录静默结坏（真发生过，
   # 导致 16 个测试脚本全部找不到）。
   # 所以：目标不存在就整体移；目标已存在则逐项合并，同名以暂存区为准。
   foreach ($item in $moved) {
@@ -111,9 +101,9 @@ finally {
     }
   }
   Remove-Item -LiteralPath $stash -Recurse -Force -ErrorAction SilentlyContinue
-  Write-Host "`n开发物已恢复。" -ForegroundColor Cyan
+  Write-Host "`n已恢复暂存项。" -ForegroundColor Cyan
 
-  # 6. 展平自检：宁可报错也不能让嵌套静默留到下次
+  # 4. 展平自检：宁可报错也不能让嵌套静默留到下次
   $nested = Join-Path $root "probe\probe"
   if (Test-Path -LiteralPath $nested) {
     Write-Host "  ✗ 检测到 probe\probe 嵌套，恢复步骤有问题！" -ForegroundColor Red
@@ -121,28 +111,25 @@ finally {
   }
 }
 
-# 7. 剔除包内开发物 + 发布包门禁
-#
-# 为什么在 finally 之后：第 1 步把 probe/ 暂存走了，打包时
-# probe\strip-dev-from-zip.ps1 根本不在目录里，清理必须在恢复完执行。
-# 为什么不能只靠第 4 步的 tar 检查：它只匹配 probe/ 与 SPEC.md，
-# pack.ps1 自己进了包它看不见（实际发生过），而检查清单必须比犯错范围宽。
-$zipFinal = Get-ChildItem (Join-Path $root "dist-extensions") -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+# 5. 发布包门禁 + 个人信息审计
+$zipFinal = Get-ChildItem (Join-Path $root "dist-extensions") -Filter "*.zip" -ErrorAction SilentlyContinue |
+  Select-Object -First 1
 if ($zipFinal) {
-  Write-Host "`n清理发布包…" -ForegroundColor Cyan
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "probe\strip-dev-from-zip.ps1") $zipFinal.FullName
-  if ($LASTEXITCODE -ne 0) { throw "发布包清理未通过。" }
-
   Write-Host "`n发布包门禁…" -ForegroundColor Cyan
   & node (Join-Path $root "probe\check-package.mjs") $zipFinal.FullName
   if ($LASTEXITCODE -ne 0) { throw "发布包内容不合格。" }
 
-  # 8. 个人信息审计
-  #
-  # 为什么单独一步：check-package 只看包，而市场要求仓库公开，
-  # probe/ 与 SPEC.md 里的注释同样会被看到。两处都扫才不会漏。
-  # 这一步没有"警告"档：要么无个人身份残留，要么不发包。
+  # 个人信息审计扫两个范围：仓库源码 + 发布包。
+  # 市场要求仓库公开，probe/ 与 SPEC.md 里的注释同样会被看到。
   Write-Host "`n个人信息审计…" -ForegroundColor Cyan
   & node (Join-Path $root "probe\audit-personal.mjs") $zipFinal.FullName
   if ($LASTEXITCODE -ne 0) { throw "发现个人信息残留，已中止。" }
+
+  # 6. 声明值与实际字节必须一致
+  #
+  # 市场按 entry.json 的 size / sha256 校验下载，任何一个对不上都装不上。
+  # 这一步是最后一道防线：本脚本不再改 zip，所以这里必须相等。
+  Write-Host "`n校验声明值…" -ForegroundColor Cyan
+  & node (Join-Path $root "probe\check-entry-integrity.mjs") $zipFinal.FullName
+  if ($LASTEXITCODE -ne 0) { throw "entry.json 的 size/sha256 与实际 zip 不一致。" }
 }
