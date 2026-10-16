@@ -443,7 +443,7 @@ export async function runPipeline(sdk, args = {}) {
         systemPrompt: EDITORIAL_SYSTEM_PROMPT,
         messages: [{ role: "user", content: editorialInput }],
         temperature: 0.4,
-        maxTokens: 4096,
+        maxTokens: 8192,
         ...(callToken ? { callToken } : {}),
         ...(taskId ? { taskId } : {}),
       }),
@@ -459,14 +459,106 @@ export async function runPipeline(sdk, args = {}) {
     }
   );
 
+  // 只兕一种情：输出到一半被 maxTokens 砍断。
+  //
+  // 切点只认「值边界」：最后一个成功闭合的 } 或 ]。
+  // 为什么不用「最后一个闭合引号」：那个引号很可能是键名的收尾（如 "note":
+  // 冒号前的那一对），从它后面切会留下半截键或半截值，补完括号仍解不通。
+  // 取 } ] 就保证切在一条完整记录之后：丢的只是最后那一条没写完的，
+  // 前面已完成的条目全部保留。
+  //
+  // 救不回就返回 null，让错误照实报出去。把残破的 JSON 硬凑成合法对象，
+  // 等于把半截新闻当成完整报道发出去 —— 那比报错更坑人。
+  function salvageTruncatedJson(s) {
+    if (!s) return null;
+    const start = s.indexOf("{");
+    if (start < 0) return null;
+    const body = s.slice(start);
+
+    // 正向扫：维护括号栈，记下最后一个干净闭合的位置
+    const stack = [];
+    let inStr = false;
+    let esc = false;
+    let cut = -1;
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "{") stack.push("}");
+      else if (c === "[") stack.push("]");
+      else if (c === "}" || c === "]") {
+        const want = stack.pop();
+        if (want !== c) return null; // 括号对不上，结构已坏，不可救
+        if (stack.length > 0) cut = i; // 外层还开着，这位置可以切
+      }
+    }
+    if (cut < 0) return null; // 一个值都没写完，没东西可保留
+
+    let head = body.slice(0, cut + 1).replace(/[,\s:]+$/, "");
+    // 尾部若停在悬空的键上（如 ..."note":），那个键也不能留
+    head = head.replace(/,?\s*"[^"]*"\s*:$/, "").replace(/[,\s:]+$/, "");
+
+    // 从 head 重算一遍括号：上面的去尾可能削掉了完整的 } ]，不能沿用扫描时的栈
+    const need = [];
+    inStr = false;
+    esc = false;
+    for (const c of head) {
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "{") need.push("}");
+      else if (c === "[") need.push("]");
+      else if (c === "}" || c === "]") if (need.pop() !== c) return null;
+    }
+    if (inStr || need.length === 0) return null;
+
+    try {
+      const o = JSON.parse(head + need.reverse().join(""));
+      return o && typeof o === "object" ? o : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 解析模型输出：先按原样解，解不出再拼回被砍断的尾巴。
+   *
+   * 返回 { data, salvaged }。salvaged 为真表示原文确实被截断、内容不全，
+   * 必须在日报上标出来 —— 不能把半截报道当天全貌发出去。
+   *
+   * 两条路必须分开记。上一版在这里埋了个坑：函数内部直接兜了拼接，
+   * 外层再用「!modelOutput && extractJson 为空」判断就永不成立，截断标签从来打不上。
+   *
+   * 旧版只有 extractJson，所以截断的输出会被“首 { 到末 }”拼成一个
+   * 永远不合法的片段（实测 3774 字符、开头完全合法的那次就是这么死的）。
+   */
+  function parseModelJson(text) {
+    const direct = extractJson(text);
+    if (direct) return { data: direct, salvaged: false };
+    return { data: salvageTruncatedJson(text), salvaged: true };
+  }
+
   // ⑤ 解析 + ref 回填
   onProgress?.({ phase: "assemble", message: "整理结构…" });
-  let modelOutput = extractJson(raw);
+  const firstParse = parseModelJson(raw);
+  let modelOutput = firstParse.data;
+  let salvageNote =
+    modelOutput && firstParse.salvaged
+      ? `模型输出被截断，只保留了已写完的部分（原始 ${raw.length} 字符，可能缺尾部条目）`
+      : null;
   let warnings = [];
 
   if (!modelOutput) {
-    // 解析失败重试一次（SPEC 7.3）。这一层只兕「模型不听话」，
-    // 不兜网关挂：那已经交给 streamWithTransientRetry 了。
+    // 解析失败重试一次（SPEC 7.3）
     onProgress?.({ phase: "editorial", message: "输出解析失败，重试一次…" });
     const retryRaw = await streamWithTransientRetry(
       (n) =>
@@ -480,21 +572,30 @@ export async function runPipeline(sdk, args = {}) {
             { role: "user", content: "上次输出不是合法 JSON。请只输出 JSON 对象本身，不要任何其他文字。" },
           ],
           temperature: 0.2,
-          maxTokens: 4096,
+          maxTokens: 8192,
           ...(callToken ? { callToken } : {}),
           ...(taskId ? { taskId } : {}),
         }),
       { attempts: 2, label: modelLabel, log: sdk.logger }
     );
-    modelOutput = extractJson(retryRaw);
+    const retryParse = parseModelJson(retryRaw);
+    modelOutput = retryParse.data;
+    if (modelOutput && retryParse.salvaged) {
+      salvageNote = `重试结果同样被截断，只保留已写完的部分（${retryRaw.length} 字符，可能缺尾部条目）`;
+    }
   }
 
   if (!modelOutput) {
     throw new Error(
-      `模型两次都没有返回合法 JSON，本次生成中止。（模型：${modelLabel}，原始输出 ${raw.length} 字符）` +
+      `模型输出无法解析成 JSON，本次生成中止。（模型：${modelLabel}，原始输出 ${raw.length} 字符）` +
+        (raw.length > 3000 ? "\n看着像被 maxTokens 截断，可换输出预算更大的模型或缩短数据窗口。" : "") +
         (raw ? `\n输出开头：${raw.slice(0, 200)}` : "\n输出为空")
     );
   }
+
+  // 拼接回来的内容是不全的。不标出来，用户会把半截日报当成当天全貌，
+  // 那比直接报错更坑人。
+  if (salvageNote) warnings.push(salvageNote);
 
   const { issueNo, isRevision } = await allocateIssueNo(sdk, date);
 
