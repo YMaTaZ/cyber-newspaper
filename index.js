@@ -68,7 +68,7 @@ function makeFetcher(sdk, timeoutMs) {
 }
 
 /** 逐行解析 NDJSON 模型流，拼出完整文本 */
-async function collectStreamText(response, label = "") {
+async function collectStreamText(response, label = "", log = null) {
   // HTTP 层失败必须当场抛出并带上状态码。
   //
   // 为什么单独加这一道：旧版本直接开始读 body，而下面的循环对解析不了的行
@@ -137,17 +137,26 @@ async function collectStreamText(response, label = "") {
     }
   }
   if (streamError && !out) throw new Error(streamError);
-  // 拿到空正文时不要把问推给上层：这里知道的比上层多。
-  // stopReason=length 就是截断的铁证，不报出来后人只能猜模型“不会输出 JSON”。
+  // 空正文不在这里报错。上层对它的处理是「带提示重试一次」，
+  // 抢在这里抛会直接打断重试路径。
+  // 但诊断信息不能丢：空正文到底是被截断、还是根本没有 text-delta，
+  // 只有流这一层知道。所以把它交给调用方给的 logger，重试照旧发生。
+  //
+  // 注意：log 必须从外面传进来。这个函数在顶层，看不到 sdk，
+  // 写成 sdkLog?.() 会在真正走到这条分支时抛 ReferenceError。
   if (!out) {
     const why =
       stopReason === "length" ? "输出被 maxTokens 截断" :
       stopReason ? `stopReason=${stopReason}` :
       "流里没有 text-delta";
-    throw new Error(
-      `模型没有返回内容（${label || "未知模型"}）：${why}` +
-        (unparsed.length ? `\n无法解析的行：${unparsed.join(" | ")}` : "")
-    );
+    try {
+      await log?.warn?.(
+        `模型返回空正文（${label || "未知模型"}）：${why}` +
+          (unparsed.length ? ` 无法解析的行：${unparsed.join(" | ")}` : "")
+      );
+    } catch {
+      /* 日志失败不能影响主流程 */
+    }
   }
   return out;
 }
@@ -347,7 +356,7 @@ export async function runPipeline(sdk, args = {}) {
     ...(taskId ? { taskId } : {}),
   });
 
-  const raw = await collectStreamText(response, modelLabel);
+  const raw = await collectStreamText(response, modelLabel, sdk.logger);
 
   // ⑤ 解析 + ref 回填
   onProgress?.({ phase: "assemble", message: "整理结构…" });
@@ -372,7 +381,7 @@ export async function runPipeline(sdk, args = {}) {
       ...(callToken ? { callToken } : {}),
       ...(taskId ? { taskId } : {}),
     });
-    modelOutput = extractJson(await collectStreamText(retryRes, modelLabel));
+    modelOutput = extractJson(await collectStreamText(retryRes, modelLabel, sdk.logger));
   }
 
   if (!modelOutput) {

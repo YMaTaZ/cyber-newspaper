@@ -30,15 +30,21 @@ const VENDOR = [/^sdk\//, /^ui\/assets\/sdk\.js$/];
 const NOTICE_FILES = /(THIRD_PARTY_NOTICES|LICENSE|COPYING|NOTICE)(\.txt)?$/i;
 // 本文件自己：它的工作就是列出待查模式，不该被自己报一遍。
 const SELF = /(^|\/)audit-personal\.mjs$/;
+// 生成物目录：已在 .gitignore 里，不会进仓库也不会公开。
+// 它存着投稿材料（带 GitHub 用户名与本机路径），扇它只会把注意力
+// 从「真正会公开的文件」上引开。GitHub 账号名本身也不是秘密。
+const GENERATED = /(^|\/)probe\/out\//;
 const TEXT_EXT = new Set([
   ".js", ".mjs", ".cjs", ".json", ".html", ".css", ".md",
   ".ps1", ".py", ".txt", ".yml", ".yaml", ".sh", ".ts",
 ]);
 
 const MUST = [
-  { id: "本人姓名（拉丁）", re: new RegExp(dec("TWFUYQ=="), "i") },
+  { id: "本人姓名（拉丁）", re: new RegExp("\\b" + dec("TWFUYQ==") + "\\b", "i") },
   { id: "本人姓名（中文）", re: new RegExp(dec("6KKB54Oo")) },
   { id: "个人域名/ID", re: new RegExp(dec("eWFjaGlu"), "i") },
+  // 上面那条不加词边界是对的：yachin 可能出现在路径或子域名里。
+  // 姓名那条必须加：GitHub 账号本身就是公开信息，不应当成泄露报。
   { id: "本机用户目录编号", re: new RegExp(dec("MjA3Njk=")) },
   { id: "本机工作区路径", re: new RegExp(dec("T0gtV29ya1NwYWNl"), "i") },
   { id: "Windows 用户绝对路径", re: /[A-Za-z]:\\Users\\/i },
@@ -105,7 +111,7 @@ function scanDir(base) {
   const hits = { must: [], confirm: [], vendor: 0, notice: 0 };
   walk(base, (file) => {
     const rel = relative(base, file).replace(/\\/g, "/");
-    if (SELF.test(rel)) return;
+    if (SELF.test(rel) || GENERATED.test(rel)) return;
     if (NOTICE_FILES.test(rel)) {
       hits.notice++;
       return;

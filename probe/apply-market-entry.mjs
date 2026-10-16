@@ -8,7 +8,10 @@
  * 用法：node apply-market-entry.mjs <市场仓库目录>
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const repoDir = process.argv[2];
 if (!repoDir) {
@@ -16,7 +19,7 @@ if (!repoDir) {
   process.exit(1);
 }
 
-const SUB = "F:/OH-WorkSpace/04_Hana与工具开发/cyber-newspaper/probe/out/market-submission";
+const SUB = join(ROOT, "probe", "out", "market-submission");
 const regEntry = JSON.parse(readFileSync(join(SUB, "registry-entry.json"), "utf8"));
 const apprEntry = JSON.parse(readFileSync(join(SUB, "approvals-entry.json"), "utf8"));
 
