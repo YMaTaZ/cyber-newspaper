@@ -287,6 +287,93 @@ async function resolveProvider(sdk, provider) {
 }
 
 /**
+ * 判别错误是否属于「重试可能就好」的瞬时故障。
+ *
+ * 为什么要分：转发网关会在连自己上游时间歇性报 5xx + 上游超时，
+ * 实测同一模型隔 19 秒就成功了。不重试就等于把一次可救的拖动变成
+ * 整次生成中止，用户得从头再点。
+ *
+ * 但不能什么错都重试：provider 不合规则、没授权、参数错这类重试一百次也是错，
+ * 只会白烧额度和时间。所以只认网关、超时、限流这一族。
+ *
+ * 状态码的写法经了一次修正：早期只写了 50[234]，而实际碰到的上游故障是
+ * 500 Internal Server Error，落在括号外面就永远不会重试。
+ * 现在按「HTTP 5xx + 状态词」匹，并单独允许 429（限流也是可重试的）。
+ * 不直接匹裸数字 500：错误文本里可能出现「最多 500 字」这类无关数字。
+ */
+const TRANSIENT = new RegExp(
+  [
+    // 状态码：跟 HTTP / 状态词 绑在一起才算，避开无关数字
+    "HTTP[\\s_:-]{0,3}[45]\\d\\d",
+    "\\b50[0-4]\\s+(?:Internal|Bad|Service|Gateway)",
+    "too\\s+many\\s+requests",
+    // 网关与链路自己会说的话
+    "bad\\s+gateway",
+    "gateway\\s+timeout",
+    "service\\s+unavailable",
+    "temporarily\\s+unavailable",
+    "internal\\s+server\\s+error",
+    "server_error",
+    "overloaded",
+    "rate.?limit",
+    // 节点层错误
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "fetch\\s+failed",
+    "timed?\\s*out",
+  ].join("|"),
+  "i"
+);
+
+/** 明确不该重试的硬错：命中这些直接放弃，把原文交给用户 */
+const FATAL =
+  /must be 1-128 ASCII|not a valid|unauthorized|forbidden|permission|capability|invalid[_ ]model|invalidparameter|range of input length|context length|maximum tokens|model not found|no such model/i;
+
+function isTransientError(e) {
+  const text = `${e?.code ?? ""} ${e?.message ?? e ?? ""}`;
+  if (FATAL.test(text)) return false;
+  return TRANSIENT.test(text);
+}
+
+/** 隔一小会儿再试。网关抽风往往持续几秒，立即重试容易再撞。 */
+function nap(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 带瞬时故障重试地调用一次模型并收齐文本。
+ *
+ * @param {() => Promise<import("./sdk/app-contract/models.js").AppModelStreamEventV2[]>} open
+ *        一次完整的发起（调用方自己保证 requestId 不重复）
+ */
+async function streamWithTransientRetry(open, { attempts = 3, backoffMs = 3000, onRetry, label, log }) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      // 把第几次传进去：requestId 必须每次不同，否则网关可能拒重复 ID
+      // 或者把两次请求归并到同一个超时连接上。
+      const response = await open(i);
+      return await collectStreamText(response, label, log);
+    } catch (e) {
+      lastErr = e;
+      // 流里的 error 事件是在 collectStreamText 内部抛的，到这儿只能按文本判。
+      const triesLeft = attempts - 1 - i;
+      if (triesLeft <= 0 || !isTransientError(e)) break;
+      try {
+        await log?.warn?.(
+          `上游瞬时故障，还有 ${triesLeft} 次重试：${String(e?.message ?? e).replace(/\s+/g, " ").slice(0, 200)}`
+        );
+      } catch {}
+      onRetry?.({ attempt: i + 1, triesLeft, error: e });
+      // 逐次递增等待。网关抽风往往持续几秒，立即重试容易再撞。
+      await nap(backoffMs * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * 核心管线。三种入口共用。
  *
  * @param {object} sdk
@@ -341,55 +428,174 @@ export async function runPipeline(sdk, args = {}) {
   const modelLabel = `${provider} / ${config.model}`;
 
   // ④ 编辑层
-  onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });
-  const requestId = `digest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });  const requestId = `digest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  const response = await sdk.models.stream({
-    requestId,
-    provider,
-    model: config.model,
-    systemPrompt: EDITORIAL_SYSTEM_PROMPT,
-    messages: [{ role: "user", content: buildEditorialInput(candidates, { date }) }],
-    temperature: 0.4,
-    maxTokens: 4096,
-    ...(callToken ? { callToken } : {}),
-    ...(taskId ? { taskId } : {}),
-  });
+  const editorialInput = buildEditorialInput(candidates, { date });
 
-  const raw = await collectStreamText(response, modelLabel, sdk.logger);
+  // 瞬时故障（上游 5xx / 超时）重试：实测转发网关会抽风，
+  // 同一模型隔 19 秒就成功。不重试等于把一次可救的拖动交给用户。
+  const raw = await streamWithTransientRetry(
+    (n) =>
+      sdk.models.stream({
+        requestId: n === 0 ? requestId : `${requestId}-r${n}`,
+        provider,
+        model: config.model,
+        systemPrompt: EDITORIAL_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: editorialInput }],
+        temperature: 0.4,
+        maxTokens: 8192,
+        ...(callToken ? { callToken } : {}),
+        ...(taskId ? { taskId } : {}),
+      }),
+    {
+      attempts: 3,
+      label: modelLabel,
+      log: sdk.logger,
+      onRetry: ({ attempt, triesLeft }) =>
+        onProgress?.({
+          phase: "editorial",
+          message: `上游暂时不可用，第 ${attempt} 次重试（还能再试 ${triesLeft} 次）…`,
+        }),
+    }
+  );
+
+  // 只兕一种情：输出到一半被 maxTokens 砍断。
+  //
+  // 切点只认「值边界」：最后一个成功闭合的 } 或 ]。
+  // 为什么不用「最后一个闭合引号」：那个引号很可能是键名的收尾（如 "note":
+  // 冒号前的那一对），从它后面切会留下半截键或半截值，补完括号仍解不通。
+  // 取 } ] 就保证切在一条完整记录之后：丢的只是最后那一条没写完的，
+  // 前面已完成的条目全部保留。
+  //
+  // 救不回就返回 null，让错误照实报出去。把残破的 JSON 硬凑成合法对象，
+  // 等于把半截新闻当成完整报道发出去 —— 那比报错更坑人。
+  function salvageTruncatedJson(s) {
+    if (!s) return null;
+    const start = s.indexOf("{");
+    if (start < 0) return null;
+    const body = s.slice(start);
+
+    // 正向扫：维护括号栈，记下最后一个干净闭合的位置
+    const stack = [];
+    let inStr = false;
+    let esc = false;
+    let cut = -1;
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "{") stack.push("}");
+      else if (c === "[") stack.push("]");
+      else if (c === "}" || c === "]") {
+        const want = stack.pop();
+        if (want !== c) return null; // 括号对不上，结构已坏，不可救
+        if (stack.length > 0) cut = i; // 外层还开着，这位置可以切
+      }
+    }
+    if (cut < 0) return null; // 一个值都没写完，没东西可保留
+
+    let head = body.slice(0, cut + 1).replace(/[,\s:]+$/, "");
+    // 尾部若停在悬空的键上（如 ..."note":），那个键也不能留
+    head = head.replace(/,?\s*"[^"]*"\s*:$/, "").replace(/[,\s:]+$/, "");
+
+    // 从 head 重算一遍括号：上面的去尾可能削掉了完整的 } ]，不能沿用扫描时的栈
+    const need = [];
+    inStr = false;
+    esc = false;
+    for (const c of head) {
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "{") need.push("}");
+      else if (c === "[") need.push("]");
+      else if (c === "}" || c === "]") if (need.pop() !== c) return null;
+    }
+    if (inStr || need.length === 0) return null;
+
+    try {
+      const o = JSON.parse(head + need.reverse().join(""));
+      return o && typeof o === "object" ? o : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 解析模型输出：先按原样解，解不出再拼回被砍断的尾巴。
+   *
+   * 返回 { data, salvaged }。salvaged 为真表示原文确实被截断、内容不全，
+   * 必须在日报上标出来 —— 不能把半截报道当天全貌发出去。
+   *
+   * 两条路必须分开记。上一版在这里埋了个坑：函数内部直接兜了拼接，
+   * 外层再用「!modelOutput && extractJson 为空」判断就永不成立，截断标签从来打不上。
+   *
+   * 旧版只有 extractJson，所以截断的输出会被“首 { 到末 }”拼成一个
+   * 永远不合法的片段（实测 3774 字符、开头完全合法的那次就是这么死的）。
+   */
+  function parseModelJson(text) {
+    const direct = extractJson(text);
+    if (direct) return { data: direct, salvaged: false };
+    return { data: salvageTruncatedJson(text), salvaged: true };
+  }
 
   // ⑤ 解析 + ref 回填
   onProgress?.({ phase: "assemble", message: "整理结构…" });
-  let modelOutput = extractJson(raw);
+  const firstParse = parseModelJson(raw);
+  let modelOutput = firstParse.data;
+  let salvageNote =
+    modelOutput && firstParse.salvaged
+      ? `模型输出被截断，只保留了已写完的部分（原始 ${raw.length} 字符，可能缺尾部条目）`
+      : null;
   let warnings = [];
 
   if (!modelOutput) {
     // 解析失败重试一次（SPEC 7.3）
     onProgress?.({ phase: "editorial", message: "输出解析失败，重试一次…" });
-    const retryId = `${requestId}-retry`;
-    const retryRes = await sdk.models.stream({
-      requestId: retryId,
-      provider,
-      model: config.model,
-      systemPrompt: EDITORIAL_SYSTEM_PROMPT,
-      messages: [
-        { role: "user", content: buildEditorialInput(candidates, { date }) },
-        { role: "user", content: "上次输出不是合法 JSON。请只输出 JSON 对象本身，不要任何其他文字。" },
-      ],
-      temperature: 0.2,
-      maxTokens: 4096,
-      ...(callToken ? { callToken } : {}),
-      ...(taskId ? { taskId } : {}),
-    });
-    modelOutput = extractJson(await collectStreamText(retryRes, modelLabel, sdk.logger));
+    const retryRaw = await streamWithTransientRetry(
+      (n) =>
+        sdk.models.stream({
+          requestId: n === 0 ? `${requestId}-retry` : `${requestId}-retry-r${n}`,
+          provider,
+          model: config.model,
+          systemPrompt: EDITORIAL_SYSTEM_PROMPT,
+          messages: [
+            { role: "user", content: editorialInput },
+            { role: "user", content: "上次输出不是合法 JSON。请只输出 JSON 对象本身，不要任何其他文字。" },
+          ],
+          temperature: 0.2,
+          maxTokens: 8192,
+          ...(callToken ? { callToken } : {}),
+          ...(taskId ? { taskId } : {}),
+        }),
+      { attempts: 2, label: modelLabel, log: sdk.logger }
+    );
+    const retryParse = parseModelJson(retryRaw);
+    modelOutput = retryParse.data;
+    if (modelOutput && retryParse.salvaged) {
+      salvageNote = `重试结果同样被截断，只保留已写完的部分（${retryRaw.length} 字符，可能缺尾部条目）`;
+    }
   }
 
   if (!modelOutput) {
     throw new Error(
-      `模型两次都没有返回合法 JSON，本次生成中止。（模型：${modelLabel}，原始输出 ${raw.length} 字符）` +
+      `模型输出无法解析成 JSON，本次生成中止。（模型：${modelLabel}，原始输出 ${raw.length} 字符）` +
+        (raw.length > 3000 ? "\n看着像被 maxTokens 截断，可换输出预算更大的模型或缩短数据窗口。" : "") +
         (raw ? `\n输出开头：${raw.slice(0, 200)}` : "\n输出为空")
     );
   }
+
+  // 拼接回来的内容是不全的。不标出来，用户会把半截日报当成当天全貌，
+  // 那比直接报错更坑人。
+  if (salvageNote) warnings.push(salvageNote);
 
   const { issueNo, isRevision } = await allocateIssueNo(sdk, date);
 
