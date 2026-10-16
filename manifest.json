@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "cyber-newspaper",
   "name": "Cyber Newspaper",
-  "version": "0.6.5",
+  "version": "0.7.0",
   "entry": "index.js",
   "icon": "assets/icon.png",
   "description": "赛博报纸：抓取多个公开 AI 数据源，归并去重后由你选定的模型整理成当天的结构化日报，按日期归档、可搜索、可导出。",

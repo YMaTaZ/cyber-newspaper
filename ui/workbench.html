@@ -600,6 +600,68 @@ async function openIssue(date) {
   content.scrollTop = 0;
 }
 
+// 生成是长活（拓 8 个源 + 调模型，80~100 秒），而宿主普通 RPC 只等 30 秒，
+// 等不到就断开，Hono 默认错误处理回一句纯文本 500（用户看到的就是那句
+// 没头没尾的 Internal Server Error）。所以后端改成了 NDJSON 流：
+// 进度边跑边推、结果最后一块给，首块立刻发出，30 秒那道门就绕过去了。
+// 这里逐行读，收到 progress 就更新进度，收到 done / error 才收尾。
+async function runStream(onProgress) {
+  const res = await fetch(apiPath("/api/digest/run"), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+  });
+  const ct = res.headers.get("content-type") || "";
+
+  // 不是流（例如路由提前挂了、或将来宿主改了行为）：退回整体解析。
+  // 不硬按流读，否则一个普通 JSON 响应会被当成“流意外结束”。
+  if (!ct.includes("ndjson")) {
+    const text = await res.text().catch(() => "");
+    try {
+      return JSON.parse(text);
+    } catch {
+      const snippet = text.slice(0, 180).replace(/\s+/g, " ").trim();
+      return {
+        ok: false,
+        error:
+          `HTTP ${res.status}${res.statusText ? " " + res.statusText : ""}` +
+          (snippet ? `：${snippet}` : "（响应体为空或非 JSON）"),
+      };
+    }
+  }
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let result = null;
+  let failure = null;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let ev = null;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue; // 半行或杂音，跳过
+      }
+      if (ev.type === "progress") onProgress?.(ev);
+      else if (ev.type === "done") result = ev;
+      else if (ev.type === "error") failure = ev;
+    }
+  }
+
+  if (failure) return { ok: false, error: failure.error, where: failure.where };
+  if (result) return { ok: true, ...result };
+  // 流断了但没收到结论：多半是宿主连接被掐
+  return { ok: false, error: "生成流意外中断，没有收到结果。请重试。" };
+}
+
 // ---------- 生成 ----------
 $("btnRun").onclick = async () => {
   const btn = $("btnRun");
@@ -617,7 +679,9 @@ $("btnRun").onclick = async () => {
   }, 500);
 
   try {
-    const r = await api("/api/digest/run", { method: "POST" });
+    const r = await runStream((p) => {
+      if (p.message) $("progressMsg").textContent = p.message;
+    });
     clearInterval(timer);
     prog.classList.remove("on");
     if (!r.ok) {
