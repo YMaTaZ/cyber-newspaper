@@ -287,6 +287,93 @@ async function resolveProvider(sdk, provider) {
 }
 
 /**
+ * 判别错误是否属于「重试可能就好」的瞬时故障。
+ *
+ * 为什么要分：转发网关会在连自己上游时间歇性报 5xx + 上游超时，
+ * 实测同一模型隔 19 秒就成功了。不重试就等于把一次可救的拖动变成
+ * 整次生成中止，用户得从头再点。
+ *
+ * 但不能什么错都重试：provider 不合规则、没授权、参数错这类重试一百次也是错，
+ * 只会白烧额度和时间。所以只认网关、超时、限流这一族。
+ *
+ * 状态码的写法经了一次修正：早期只写了 50[234]，而实际碰到的上游故障是
+ * 500 Internal Server Error，落在括号外面就永远不会重试。
+ * 现在按「HTTP 5xx + 状态词」匹，并单独允许 429（限流也是可重试的）。
+ * 不直接匹裸数字 500：错误文本里可能出现「最多 500 字」这类无关数字。
+ */
+const TRANSIENT = new RegExp(
+  [
+    // 状态码：跟 HTTP / 状态词 绑在一起才算，避开无关数字
+    "HTTP[\\s_:-]{0,3}[45]\\d\\d",
+    "\\b50[0-4]\\s+(?:Internal|Bad|Service|Gateway)",
+    "too\\s+many\\s+requests",
+    // 网关与链路自己会说的话
+    "bad\\s+gateway",
+    "gateway\\s+timeout",
+    "service\\s+unavailable",
+    "temporarily\\s+unavailable",
+    "internal\\s+server\\s+error",
+    "server_error",
+    "overloaded",
+    "rate.?limit",
+    // 节点层错误
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "fetch\\s+failed",
+    "timed?\\s*out",
+  ].join("|"),
+  "i"
+);
+
+/** 明确不该重试的硬错：命中这些直接放弃，把原文交给用户 */
+const FATAL =
+  /must be 1-128 ASCII|not a valid|unauthorized|forbidden|permission|capability|invalid[_ ]model|invalidparameter|range of input length|context length|maximum tokens|model not found|no such model/i;
+
+function isTransientError(e) {
+  const text = `${e?.code ?? ""} ${e?.message ?? e ?? ""}`;
+  if (FATAL.test(text)) return false;
+  return TRANSIENT.test(text);
+}
+
+/** 隔一小会儿再试。网关抽风往往持续几秒，立即重试容易再撞。 */
+function nap(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 带瞬时故障重试地调用一次模型并收齐文本。
+ *
+ * @param {() => Promise<import("./sdk/app-contract/models.js").AppModelStreamEventV2[]>} open
+ *        一次完整的发起（调用方自己保证 requestId 不重复）
+ */
+async function streamWithTransientRetry(open, { attempts = 3, backoffMs = 3000, onRetry, label, log }) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      // 把第几次传进去：requestId 必须每次不同，否则网关可能拒重复 ID
+      // 或者把两次请求归并到同一个超时连接上。
+      const response = await open(i);
+      return await collectStreamText(response, label, log);
+    } catch (e) {
+      lastErr = e;
+      // 流里的 error 事件是在 collectStreamText 内部抛的，到这儿只能按文本判。
+      const triesLeft = attempts - 1 - i;
+      if (triesLeft <= 0 || !isTransientError(e)) break;
+      try {
+        await log?.warn?.(
+          `上游瞬时故障，还有 ${triesLeft} 次重试：${String(e?.message ?? e).replace(/\s+/g, " ").slice(0, 200)}`
+        );
+      } catch {}
+      onRetry?.({ attempt: i + 1, triesLeft, error: e });
+      // 逐次递增等待。网关抽风往往持续几秒，立即重试容易再撞。
+      await nap(backoffMs * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * 核心管线。三种入口共用。
  *
  * @param {object} sdk
@@ -341,22 +428,36 @@ export async function runPipeline(sdk, args = {}) {
   const modelLabel = `${provider} / ${config.model}`;
 
   // ④ 编辑层
-  onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });
-  const requestId = `digest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });  const requestId = `digest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  const response = await sdk.models.stream({
-    requestId,
-    provider,
-    model: config.model,
-    systemPrompt: EDITORIAL_SYSTEM_PROMPT,
-    messages: [{ role: "user", content: buildEditorialInput(candidates, { date }) }],
-    temperature: 0.4,
-    maxTokens: 4096,
-    ...(callToken ? { callToken } : {}),
-    ...(taskId ? { taskId } : {}),
-  });
+  const editorialInput = buildEditorialInput(candidates, { date });
 
-  const raw = await collectStreamText(response, modelLabel, sdk.logger);
+  // 瞬时故障（上游 5xx / 超时）重试：实测转发网关会抽风，
+  // 同一模型隔 19 秒就成功。不重试等于把一次可救的拖动交给用户。
+  const raw = await streamWithTransientRetry(
+    (n) =>
+      sdk.models.stream({
+        requestId: n === 0 ? requestId : `${requestId}-r${n}`,
+        provider,
+        model: config.model,
+        systemPrompt: EDITORIAL_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: editorialInput }],
+        temperature: 0.4,
+        maxTokens: 4096,
+        ...(callToken ? { callToken } : {}),
+        ...(taskId ? { taskId } : {}),
+      }),
+    {
+      attempts: 3,
+      label: modelLabel,
+      log: sdk.logger,
+      onRetry: ({ attempt, triesLeft }) =>
+        onProgress?.({
+          phase: "editorial",
+          message: `上游暂时不可用，第 ${attempt} 次重试（还能再试 ${triesLeft} 次）…`,
+        }),
+    }
+  );
 
   // ⑤ 解析 + ref 回填
   onProgress?.({ phase: "assemble", message: "整理结构…" });
@@ -364,24 +465,28 @@ export async function runPipeline(sdk, args = {}) {
   let warnings = [];
 
   if (!modelOutput) {
-    // 解析失败重试一次（SPEC 7.3）
+    // 解析失败重试一次（SPEC 7.3）。这一层只兕「模型不听话」，
+    // 不兜网关挂：那已经交给 streamWithTransientRetry 了。
     onProgress?.({ phase: "editorial", message: "输出解析失败，重试一次…" });
-    const retryId = `${requestId}-retry`;
-    const retryRes = await sdk.models.stream({
-      requestId: retryId,
-      provider,
-      model: config.model,
-      systemPrompt: EDITORIAL_SYSTEM_PROMPT,
-      messages: [
-        { role: "user", content: buildEditorialInput(candidates, { date }) },
-        { role: "user", content: "上次输出不是合法 JSON。请只输出 JSON 对象本身，不要任何其他文字。" },
-      ],
-      temperature: 0.2,
-      maxTokens: 4096,
-      ...(callToken ? { callToken } : {}),
-      ...(taskId ? { taskId } : {}),
-    });
-    modelOutput = extractJson(await collectStreamText(retryRes, modelLabel, sdk.logger));
+    const retryRaw = await streamWithTransientRetry(
+      (n) =>
+        sdk.models.stream({
+          requestId: n === 0 ? `${requestId}-retry` : `${requestId}-retry-r${n}`,
+          provider,
+          model: config.model,
+          systemPrompt: EDITORIAL_SYSTEM_PROMPT,
+          messages: [
+            { role: "user", content: editorialInput },
+            { role: "user", content: "上次输出不是合法 JSON。请只输出 JSON 对象本身，不要任何其他文字。" },
+          ],
+          temperature: 0.2,
+          maxTokens: 4096,
+          ...(callToken ? { callToken } : {}),
+          ...(taskId ? { taskId } : {}),
+        }),
+      { attempts: 2, label: modelLabel, log: sdk.logger }
+    );
+    modelOutput = extractJson(retryRaw);
   }
 
   if (!modelOutput) {
