@@ -385,14 +385,27 @@ async function streamWithTransientRetry(open, { attempts = 3, backoffMs = 3000, 
  * @returns {{ issue, html, warnings }}
  */
 export async function runPipeline(sdk, args = {}) {
-  const { onProgress, callToken, taskId } = args;
+  const { onProgress, callToken, taskId, isCancelled } = args;
   const config = args.config ?? (await loadConfig(sdk));
   const startedAt = Date.now();
+
+  // 调用方（流式路由）可以告诉我们读端已断开。
+  // 为什么在阶段边界检查而不是中途随时打断：抓取和模型调用都不容易
+  // 中途取消，硬断反而留下半截状态。阶段边界是干净的可停点，
+  // 停在这里既不白烧后面的模型额度，也不会留下残缺归档。
+  const checkCancelled = () => {
+    if (isCancelled?.()) {
+      const err = new Error("生成已取消（读端断开）");
+      err.code = "DIGEST_CANCELLED";
+      throw err;
+    }
+  };
 
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
   // ① 抓取
+  checkCancelled();
   onProgress?.({ phase: "fetch", message: "抓取数据源…" });
   const enabled = config.enabledSources ?? SOURCE_IDS;
   const { items, report } = await fetchAll({
@@ -408,6 +421,7 @@ export async function runPipeline(sdk, args = {}) {
   }
 
   // ② 归并
+  checkCancelled();
   onProgress?.({ phase: "merge", message: "归并去重…" });
   const { candidates, stats } = buildCandidatePool(items, {
     maxCandidates: config.maxCandidates ?? 40,
@@ -428,6 +442,7 @@ export async function runPipeline(sdk, args = {}) {
   const modelLabel = `${provider} / ${config.model}`;
 
   // ④ 编辑层
+  checkCancelled();
   onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });  const requestId = `digest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   const editorialInput = buildEditorialInput(candidates, { date });
@@ -762,21 +777,72 @@ export default defineApp(async (sdk) => {
     app.get("/api/digest/formats", (c) => c.json({ ok: true, formats: FORMATS }));
 
     // 工作台生成入口：无 callToken，因此不出 PDF（SPEC 3.3 实现红线）
-    app.post("/api/digest/run", async (c) => {
-      try {
-        const result = await runPipeline(sdk, {
-          onProgress: () => {},
-        });
-        return c.json({
-          ok: true,
-          issue: result.issue,
-          html: renderIssue(result.issue, { mode: "embed" }),
-          warnings: result.warnings,
-          elapsedMs: result.elapsedMs,
-        });
-      } catch (e) {
-        return jsonError(c, sdk, "run", e);
-      }
+    //
+    // 为什么是流而不是一次 c.json：
+    //   一次生成要跑 80~100 秒（抓 8 个源 + 调模型），而宿主普通 RPC
+    //   默认只等 30 秒（APPS.md）。超时后宿主断开，Hono 默认错误处理
+    //   回一句纯文本 "Internal Server Error" 500，用户看到的就是那句
+    //   没头没尾的话；而管线其实还在后台跑，跑完还写进了归档。
+    //   界面因此出现「报错但归档里有这一期」的怪事。
+    //   改成 NDJSON 流后，处理器立刻返回 Response（不等管线跑完），
+    //   宿主的 RPC 很快就完成，30 秒那道门就绕过去了。
+    app.post("/api/digest/run", (c) => {
+      const encoder = new TextEncoder();
+      let closed = false;
+      const stream = new ReadableStream({
+        async start(controller) {
+          // 读端断开后 enqueue 会抛，用它当停止信号，别让后台白跑
+          const send = (obj) => {
+            if (closed) return;
+            try {
+              controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+            } catch {
+              closed = true;
+            }
+          };
+          try {
+            // 先发一块：让响应头立刻出去，这是绕开 30 秒的关键
+            send({ type: "progress", phase: "start", message: "开始生成…" });
+            const result = await runPipeline(sdk, {
+              onProgress: (p) => send({ type: "progress", ...p }),
+              // 用户关掉页面 / 切走后，宿主会取消这条流。不能只靠 enqueue 抛错
+              // 来发现：highWaterMark 未满时 enqueue 并不抛，后台会白跑一整轮、
+              // 白烧模型额度。把“已断开”这件事显式交给管线判断。
+              isCancelled: () => closed,
+            });
+            send({
+              type: "done",
+              issue: result.issue,
+              html: renderIssue(result.issue, { mode: "embed" }),
+              warnings: result.warnings,
+              elapsedMs: result.elapsedMs,
+            });
+          } catch (e) {
+            // 失败仍要写日志：jsonError 那条路走不通了（响应头已发出），
+            // 不记的话下次又得靠猜。
+            const message = e?.message ?? String(e);
+            try {
+              await sdk.logger.error(`route run failed: ${message}\n${e?.stack ?? ""}`);
+            } catch {}
+            send({ type: "error", error: message, where: "run" });
+          } finally {
+            closed = true;
+            try {
+              controller.close();
+            } catch {}
+          }
+        },
+        // 宿主取消这条流（客户端断开、App 被停）时触发。
+        // 没有它 closed 永远是 false，isCancelled() 就白加了。
+        cancel() {
+          closed = true;
+        },
+      });
+      // cancel 在宿主取消这条流时触发（客户端断开、App 被停）
+      return c.body(stream, 200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "cache-control": "no-store",
+      });
     });
   });
 
