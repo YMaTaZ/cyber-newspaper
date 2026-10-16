@@ -86,7 +86,7 @@ const pr = `## 基本信息
 
 ## 图标预览
 
-![icon](https://raw.githubusercontent.com/${REPO}/${tag}/assets/icon.png)
+![icon](https://raw.githubusercontent.com/${REPO}/main/assets/icon.png)
 
 黑底白线的报纸图形，与 App 内的瑞士国际主义风格同源。
 
@@ -96,11 +96,11 @@ const pr = `## 基本信息
 
 **浅色（暖纸）**
 
-![workbench light](https://raw.githubusercontent.com/${REPO}/${tag}/docs/screenshots/workbench-light.png)
+![workbench light](https://raw.githubusercontent.com/${REPO}/main/docs/screenshots/workbench-light.png)
 
 **深色（午夜）**
 
-![workbench dark](https://raw.githubusercontent.com/${REPO}/${tag}/docs/screenshots/workbench-dark.png)
+![workbench dark](https://raw.githubusercontent.com/${REPO}/main/docs/screenshots/workbench-dark.png)
 
 截图说明：左栏是往期归档（按期号与日期），中间是当天日报正文，顶部是导出与生成入口。栏目数量与名称由模型根据当天内容决定，视觉风格（硬线分隔、零圆角、宽字距小标签）固定。
 

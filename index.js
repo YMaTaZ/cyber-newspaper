@@ -68,7 +68,27 @@ function makeFetcher(sdk, timeoutMs) {
 }
 
 /** 逐行解析 NDJSON 模型流，拼出完整文本 */
-async function collectStreamText(response) {
+async function collectStreamText(response, label = "") {
+  // HTTP 层失败必须当场抛出并带上状态码。
+  //
+  // 为什么单独加这一道：旧版本直接开始读 body，而下面的循环对解析不了的行
+  // 一律 continue。供应商网关报 500 时返回的是错误页而非 NDJSON，于是每一行都被
+  // 静默丢掉，最终 out=""、streamError=null，上层把它报成「模型没有返回合法 JSON」。
+  // 网络故障被伪装成了模型问题，把排查方向整条带偏。
+  if (response && response.ok === false) {
+    let snippet = "";
+    try {
+      snippet = String(await response.text()).slice(0, 300);
+    } catch {
+      /* 读不到就算了，状态码已经够定位 */
+    }
+    throw new Error(
+      `模型调用失败：HTTP ${response.status}${response.statusText ? " " + response.statusText : ""}` +
+        (label ? `（${label}）` : "") +
+        (snippet ? `\n供应商返回：${snippet}` : "")
+    );
+  }
+
   const reader = response.body?.getReader?.();
   if (!reader) {
     // 退化路径：当作普通 JSON 响应
@@ -84,6 +104,8 @@ async function collectStreamText(response) {
   let buf = "";
   let out = "";
   let streamError = null;
+  let unparsed = [];   // 解析不了的原样行，只用于出错时取证
+  let stopReason = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -98,18 +120,35 @@ async function collectStreamText(response) {
       try {
         ev = JSON.parse(s);
       } catch {
+        if (unparsed.length < 3) unparsed.push(s.slice(0, 200));
         continue;
       }
       if (ev.type === "text-delta") out += ev.delta ?? "";
       else if (ev.type === "error") streamError = `${ev.code}: ${ev.message}`;
-      else if (ev.type === "done" && !out) {
-        // 有些适配器只在 done 里给完整内容
-        const asst = ev.assistant?.content ?? [];
-        out = asst.filter((c) => c.type === "text").map((c) => c.text).join("");
+      else if (ev.type === "done") {
+        stopReason = ev.stopReason ?? null;
+        // 有些适配器只在 done 里给完整内容（以前写成另一个 else-if，会被上面的
+        // done 分支短路，永远进不到）。
+        if (!out) {
+          const asst = ev.assistant?.content ?? [];
+          out = asst.filter((c) => c.type === "text").map((c) => c.text).join("");
+        }
       }
     }
   }
   if (streamError && !out) throw new Error(streamError);
+  // 拿到空正文时不要把问推给上层：这里知道的比上层多。
+  // stopReason=length 就是截断的铁证，不报出来后人只能猜模型“不会输出 JSON”。
+  if (!out) {
+    const why =
+      stopReason === "length" ? "输出被 maxTokens 截断" :
+      stopReason ? `stopReason=${stopReason}` :
+      "流里没有 text-delta";
+    throw new Error(
+      `模型没有返回内容（${label || "未知模型"}）：${why}` +
+        (unparsed.length ? `\n无法解析的行：${unparsed.join(" | ")}` : "")
+    );
+  }
   return out;
 }
 
@@ -289,6 +328,8 @@ export async function runPipeline(sdk, args = {}) {
   }
   const resolved = await resolveProvider(sdk, config.provider);
   const provider = resolved.provider;
+  // 日志与报错都用这个标签：出问题时能直接看出是哪个模型挂了。
+  const modelLabel = `${provider} / ${config.model}`;
 
   // ④ 编辑层
   onProgress?.({ phase: "editorial", message: `调用 ${config.provider} / ${config.model} 生成…` });
@@ -306,7 +347,7 @@ export async function runPipeline(sdk, args = {}) {
     ...(taskId ? { taskId } : {}),
   });
 
-  const raw = await collectStreamText(response);
+  const raw = await collectStreamText(response, modelLabel);
 
   // ⑤ 解析 + ref 回填
   onProgress?.({ phase: "assemble", message: "整理结构…" });
@@ -331,11 +372,14 @@ export async function runPipeline(sdk, args = {}) {
       ...(callToken ? { callToken } : {}),
       ...(taskId ? { taskId } : {}),
     });
-    modelOutput = extractJson(await collectStreamText(retryRes));
+    modelOutput = extractJson(await collectStreamText(retryRes, modelLabel));
   }
 
   if (!modelOutput) {
-    throw new Error("模型两次都没有返回合法 JSON，本次生成中止。");
+    throw new Error(
+      `模型两次都没有返回合法 JSON，本次生成中止。（模型：${modelLabel}，原始输出 ${raw.length} 字符）` +
+        (raw ? `\n输出开头：${raw.slice(0, 200)}` : "\n输出为空")
+    );
   }
 
   const { issueNo, isRevision } = await allocateIssueNo(sdk, date);
