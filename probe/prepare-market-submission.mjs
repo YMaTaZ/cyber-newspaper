@@ -37,7 +37,11 @@ if (!zipName) {
   process.exit(1);
 }
 const entry = JSON.parse(readFileSync(join(ROOT, "dist-extensions", zipName), "utf8"));
-const readme = readFileSync(join(OUT, "market-readme.md"), "utf8").trim();
+// 投稿介绍是从这里读的，不是从根目录 README.md：根 README 含开发章节与本地命令，
+// 是给仓库访客看的；商店里展示的是用户向的那份。
+// 它放在 probe/ 而不是 probe/out/：out/ 被 .gitignore 挡着，一清就没了，
+// 而这是投稿的**源文件**，必须进版本库。
+const readme = readFileSync(join(HERE, "market-readme.md"), "utf8").trim();
 
 console.log("=== 源数据 ===");
 console.log("  id       :", entry.id);
