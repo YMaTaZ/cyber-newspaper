@@ -123,4 +123,9 @@ await api(`/git/refs/heads/${branchArg}`, {
   body: { sha: newCommit.sha, force: false },
 });
 console.log(`\n✓ ${branchArg} 已更新到 ${newCommit.sha.slice(0, 7)}（未走 github.com）`);
-console.log("  提示：这是压缩提交，本地历史与远程不再逐条对应；网络恢复后如需一致可 git fetch + reset。");
+console.log("  提示：这条路只推内容、推不了历史。远端会与本机分叉：两边文件逐字一致，但提交链不同，");
+console.log("        之后再走 git push 会被当作非快进拒掉，只能继续用本脚本，分叉会越堆越厚。");
+console.log("        github.com 恢复后应该执行：");
+console.log(`            git push --force-with-lease origin ${branchArg}`);
+console.log("        把远端换回真实历史（已发布的 v* tag 仍引用着压缩提交，所以不会丢对象）。");
+console.log("        不要反过来用 git fetch + reset 把本机对齐压缩历史——那会丢掉本机的提交粒度。");
